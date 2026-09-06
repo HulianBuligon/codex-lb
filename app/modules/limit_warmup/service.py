@@ -387,14 +387,17 @@ class LimitWarmupService:
                         before_secondary=before_secondary,
                         after_primary=after_primary,
                         after_secondary=after_secondary,
+                        exhausted_threshold_percent=settings.limit_warmup_exhausted_threshold_percent,
                         min_available_percent=settings.limit_warmup_min_available_percent,
                     )
                 if candidate is None and window == "secondary":
                     candidate = _build_paid_to_free_transition_candidate(
                         account=account,
                         previous_plan_type=(previous_plan_types or {}).get(account.id),
+                        before_secondary=before_secondary,
                         after_secondary=after_secondary,
                         refresh_started_at=refresh_started_at,
+                        exhausted_threshold_percent=settings.limit_warmup_exhausted_threshold_percent,
                         min_available_percent=settings.limit_warmup_min_available_percent,
                     )
                 if (
@@ -699,6 +702,7 @@ def _build_candidate(
     before_secondary: dict[str, UsageHistory],
     after_primary: dict[str, UsageHistory],
     after_secondary: dict[str, UsageHistory],
+    exhausted_threshold_percent: float,
     min_available_percent: float,
 ) -> _WarmupCandidate | None:
     before = _effective_usage_entry(
@@ -714,6 +718,8 @@ def _build_candidate(
         secondary=after_secondary,
     )
     if before is None or after is None:
+        return None
+    if before.used_percent < exhausted_threshold_percent:
         return None
     available_percent = 100.0 - after.used_percent
     if min_available_percent < 100.0 and available_percent < min_available_percent:
@@ -758,8 +764,10 @@ def _build_paid_to_free_transition_candidate(
     *,
     account: Account,
     previous_plan_type: str | None,
+    before_secondary: dict[str, UsageHistory],
     after_secondary: dict[str, UsageHistory],
     refresh_started_at: datetime | None,
+    exhausted_threshold_percent: float,
     min_available_percent: float,
 ) -> _WarmupCandidate | None:
     normalized_previous_plan = normalize_account_plan_type(previous_plan_type)
@@ -773,6 +781,11 @@ def _build_paid_to_free_transition_candidate(
     if after is None or after.window != "monthly" or after.reset_at is None:
         return None
     if after.recorded_at < refresh_started_at:
+        return None
+    before = before_secondary.get(account.id)
+    if before is None and exhausted_threshold_percent > 0.0:
+        return None
+    if before is not None and before.used_percent < exhausted_threshold_percent:
         return None
     if after.used_percent >= 100.0:
         return None

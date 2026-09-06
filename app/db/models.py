@@ -1048,8 +1048,8 @@ class DashboardSettings(Base):
     )
     limit_warmup_exhausted_threshold_percent: Mapped[float] = mapped_column(
         Float,
-        default=99.0,
-        server_default=text("99.0"),
+        default=0.0,
+        server_default=text("0.0"),
         nullable=False,
     )
     limit_warmup_idle_threshold_percent: Mapped[float] = mapped_column(

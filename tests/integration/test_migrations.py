@@ -522,7 +522,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                     text("SELECT limit_warmup_exhausted_threshold_percent FROM dashboard_settings WHERE id=1")
                 )
             ).scalar_one()
-            assert exhausted_threshold == 99.0
+            assert exhausted_threshold == 0.0
             idle_threshold = (
                 await session.execute(
                     text("SELECT limit_warmup_idle_threshold_percent FROM dashboard_settings WHERE id=1")
@@ -825,6 +825,100 @@ async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_
             ).one()
             assert row[0] in (True, 1)
             assert row[1] in (True, 1)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initial_threshold", "expected_threshold"),
+    [(99.0, 0.0), (50.0, 50.0)],
+)
+async def test_limit_warmup_threshold_migration_updates_only_historical_default(
+    tmp_path,
+    initial_threshold: float,
+    expected_threshold: float,
+):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / f'limit-warmup-threshold-{initial_threshold}.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE dashboard_settings
+                    SET limit_warmup_exhausted_threshold_percent = :initial_threshold
+                    WHERE id = 1
+                    """
+                ),
+                {"initial_threshold": initial_threshold},
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            value = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT limit_warmup_exhausted_threshold_percent
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).scalar_one()
+            assert value == expected_threshold
+
+            columns = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).all()
+            threshold_column = next(row for row in columns if row[1] == "limit_warmup_exhausted_threshold_percent")
+            assert threshold_column[4] in ("0.0", "0")
+
+        from alembic import command
+
+        from app.db.migrate import _build_alembic_config
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+
+        async with session_factory() as session:
+            value = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT limit_warmup_exhausted_threshold_percent
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).scalar_one()
+            assert value == expected_threshold
+
+            columns = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).all()
+            threshold_column = next(row for row in columns if row[1] == "limit_warmup_exhausted_threshold_percent")
+            assert threshold_column[4] in ("99.0", "99")
+
+        await to_thread.run_sync(lambda: command.upgrade(_build_alembic_config(db_url), "head"))
+
+        async with session_factory() as session:
+            value = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT limit_warmup_exhausted_threshold_percent
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).scalar_one()
+            assert value == expected_threshold
     finally:
         await engine.dispose()
 
