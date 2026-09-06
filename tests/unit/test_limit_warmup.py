@@ -1219,6 +1219,41 @@ async def test_paid_to_free_transition_respects_pre_reset_usage_threshold() -> N
 
 
 @pytest.mark.asyncio
+async def test_paid_to_free_transition_does_not_use_non_monthly_history_for_threshold() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+    refresh_started_at = datetime(2026, 8, 18, 18, 8, tzinfo=timezone.utc).replace(tzinfo=None)
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_windows="secondary",
+            limit_warmup_exhausted_threshold_percent=50.0,
+        ),
+        before_primary={},
+        before_secondary={account.id: _usage(account.id, used_percent=75, reset_at=10_000, window="secondary")},
+        after_primary={},
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=2_000_000_000,
+                window="monthly",
+                recorded_at=refresh_started_at,
+            )
+        },
+        previous_plan_types={account.id: "plus"},
+        refresh_started_at=refresh_started_at,
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("previous_plan_type", "current_plan_type", "sample_age_seconds", "used_percent", "minimum_available"),
     [

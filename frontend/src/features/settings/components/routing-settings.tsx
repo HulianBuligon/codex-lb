@@ -276,6 +276,7 @@ export function RoutingSettings({
   const limitWarmupCooldownValid = Number.isInteger(parsedLimitWarmupCooldown) && parsedLimitWarmupCooldown >= 60;
   const parsedLimitWarmupExhaustedThreshold = Number(draft.limitWarmupExhaustedThreshold);
   const limitWarmupExhaustedThresholdValid =
+    draft.limitWarmupExhaustedThreshold.trim() !== "" &&
     Number.isFinite(parsedLimitWarmupExhaustedThreshold) &&
     parsedLimitWarmupExhaustedThreshold >= 0 &&
     parsedLimitWarmupExhaustedThreshold <= 100;

@@ -246,6 +246,17 @@ async def test_settings_api_get_and_update(async_client):
 
 
 @pytest.mark.asyncio
+async def test_settings_api_accepts_zero_limit_warmup_threshold(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={"limitWarmupExhaustedThresholdPercent": 0},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["limitWarmupExhaustedThresholdPercent"] == 0.0
+
+
+@pytest.mark.asyncio
 async def test_settings_api_capacity_overrides_support_absent_null_and_explicit_values(async_client):
     configured = await async_client.put(
         "/api/settings",

@@ -783,10 +783,11 @@ def _build_paid_to_free_transition_candidate(
     if after.recorded_at < refresh_started_at:
         return None
     before = before_secondary.get(account.id)
-    if before is None and exhausted_threshold_percent > 0.0:
-        return None
-    if before is not None and before.used_percent < exhausted_threshold_percent:
-        return None
+    if exhausted_threshold_percent > 0.0:
+        if before is None or before.window != "monthly":
+            return None
+        if before.used_percent < exhausted_threshold_percent:
+            return None
     if after.used_percent >= 100.0:
         return None
     available_percent = 100.0 - after.used_percent

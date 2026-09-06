@@ -57,22 +57,12 @@ remain required.
 - **AND WHEN** the threshold is `0.0`
 - **THEN** the confirmed transition MAY send one monthly warm-up
 
-#### Scenario: Warm-up remains skipped unless reset is confirmed
+#### Scenario: Warm-up is skipped unless reset is confirmed
 
 - **GIVEN** limit warm-up is enabled globally and for an account
 - **AND** the pre-reset sample meets the configured threshold
 - **WHEN** the newer sample does not prove a real reset transition
 - **THEN** background usage refresh MUST NOT send warm-up traffic
-
-#### Scenario: Warm-up is skipped unless reset is confirmed
-
-- **GIVEN** limit warm-up is enabled globally and for an account
-- **AND** the account's previous usage sample for a selected window meets the
-  configured threshold
-- **WHEN** background usage refresh records a newer sample for that window with
-  `used_percent < 100` and a confirmed later `reset_at`
-- **THEN** the system sends at most one warm-up request for that
-  account/window/reset tuple
 
 #### Scenario: Warm-up is not triggered by upstream reset_at timestamp jitter
 
