@@ -25,7 +25,8 @@ resets and the paid-to-Free fallback.
 - Changing global or per-account warm-up opt-in.
 - Changing reset confirmation, availability, cooldown, sender preflight, or
   attempt identity semantics.
-- Adding a new setting, endpoint, background worker, or retry path.
+- Adding a new public setting, dashboard control, API field, background worker,
+  or retry path.
 
 ## Decisions
 
@@ -53,21 +54,29 @@ non-zero operator threshold.
 
 Backend Pydantic fields use `ge=0`, frontend Zod schemas use `nonnegative()`,
 and the numeric control uses `min={0}`. Repository/model defaults and the
-server default all use `0.0`, so new settings rows and API/UI defaults agree.
+active storage server default all use `0.0`, so new settings rows and API/UI
+defaults agree.
 
-### Convert only the historical default in the migration
+### Expand active storage without rewriting the legacy column
 
-The migration updates exactly `99.0` rows and leaves every other stored value
-alone. It updates the column server default to `0.0` and restores `99.0` only
-as the server default on downgrade; downgrade intentionally does not rewrite
-operator data back to an indistinguishable historical value.
+The migration retains `limit_warmup_exhausted_threshold_percent` and its
+`99.0` server default as compatibility storage for replicas running the parent
+application schema. It adds `limit_warmup_reset_threshold_percent` with a
+`0.0` default, maps legacy `99.0` rows to `0.0`, and copies every other value.
+The ORM keeps the public Python/API attribute on the new column and maps the
+old column under an explicit legacy-only attribute. Downgrade drops only the
+new column, so old replicas never parse a zero written into their positive-only
+field and rollback retains the previous schema and values.
 
 ## Risks / Trade-offs
 
 - [Risk] Existing deployments might have stored `99.0` intentionally. → The
-  migration cannot distinguish that value from the old default, so it treats
-  exactly `99.0` as the historical default; all other values are preserved and
-  the PR documents the choice.
+  migration cannot distinguish that value from the old default when seeding
+  active storage, so it maps exactly `99.0` to `0.0`; all other values are
+  copied and the legacy value itself remains unchanged.
+- [Risk] A pre-upgrade migration can run while old replicas still serve. → The
+  migration never writes zero into their positive-only column; old replicas
+  keep reading the legacy value and downgrade removes only active storage.
 - [Risk] A zero threshold could send more warm-up traffic. → Warm-up remains
   globally and per-account opt-in, post-reset availability-gated, bounded by
   the existing sender/concurrency controls, and deduplicated per reset tuple.
@@ -77,7 +86,9 @@ operator data back to an indistinguishable historical value.
 
 ## Migration Plan
 
-Apply the new Alembic revision during the normal startup migration. It updates
-the setting default and historical default rows only. Rollback restores the
-previous server default and candidate behavior; it does not reverse explicit
-operator values.
+Apply the new Alembic revision during the normal startup migration. It adds and
+backfills active storage without mutating the legacy column. Current replicas
+read and write the active column through the existing public setting name;
+previous replicas continue reading the legacy column during rollout. Rollback
+drops only active storage and restores the previous application's readable
+schema without rewriting operator values.

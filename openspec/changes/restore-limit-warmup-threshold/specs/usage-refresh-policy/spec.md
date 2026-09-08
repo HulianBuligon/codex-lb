@@ -14,6 +14,20 @@ require the observed pre-reset sample to meet that floor. Existing post-reset
 availability, opt-in, active-account, sender, and durable deduplication gates
 remain required.
 
+Background usage refresh MUST complete any applicable blocked-status
+reconciliation before warm-up evaluation. Candidate evaluation and the
+sender's fresh preflight check MUST both require the account to be `active`;
+paused, deactivated, `reauth_required`, `rate_limited`, and `quota_exceeded`
+accounts MUST NOT receive warm-up traffic. When a reset-confirmed recovery
+uses persisted transition evidence, warm-up SHALL reuse that same before/after
+pair so the new account/window/reset tuple enters the ordinary durable
+deduplication path.
+
+The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle
+warm-up candidates. It MUST NOT suppress a reset-confirmed candidate for a
+distinct account/window/reset tuple, which remains protected by the durable
+atomic attempt claim for that tuple.
+
 #### Scenario: Zero threshold warms a non-exhausted confirmed reset
 
 - **GIVEN** limit warm-up is enabled globally and for an account
@@ -57,6 +71,18 @@ remain required.
 - **AND WHEN** the threshold is `0.0`
 - **THEN** the confirmed transition MAY send one monthly warm-up
 
+#### Scenario: Staggered idle cooldown does not suppress a distinct reset tuple
+
+- **GIVEN** an account has a recent warm-up attempt inside
+  `limit_warmup_cooldown_seconds`
+- **AND** background usage refresh confirms a different selected
+  account/window/reset tuple whose pre-reset sample meets the configured
+  threshold
+- **WHEN** reset-confirmed warm-up evaluates the new tuple
+- **THEN** the staggered idle cooldown MUST NOT suppress that candidate
+- **AND** the durable attempt claim MUST still prevent another send for an
+  already claimed identical tuple
+
 #### Scenario: Warm-up is skipped unless reset is confirmed
 
 - **GIVEN** limit warm-up is enabled globally and for an account
@@ -93,9 +119,33 @@ remain required.
 
 #### Scenario: Warm-up respects unsafe account states
 
-- **WHEN** an account is paused, deactivated, rate-limited, quota-exceeded, or
-  in an auth-refresh failure path
+- **WHEN** an account is paused, deactivated, `reauth_required`, rate-limited,
+  quota-exceeded, or in an auth-refresh failure path
 - **THEN** limit warm-up MUST NOT send traffic for that account
+
+#### Scenario: Reset recovery completes before warm-up
+
+- **GIVEN** an opted-in Free account is `rate_limited` and has qualifying
+  monthly reset evidence whose pre-reset sample meets the configured threshold
+- **WHEN** marker-guarded recovery succeeds
+- **THEN** the scheduler first persists the account as `active` and clears its
+  block markers
+- **AND** only then may it evaluate the same monthly reset tuple for warm-up
+
+#### Scenario: Recovery race prevents warm-up from stale evidence
+
+- **GIVEN** reset evidence makes a blocked account appear recoverable
+- **AND** a concurrent write changes its status or block markers before
+  recovery persists
+- **WHEN** the recovery compare-and-set misses
+- **THEN** the stale scheduler snapshot remains ineligible for warm-up
+
+#### Scenario: Sender rejects an account re-blocked after candidate creation
+
+- **GIVEN** an active account produced a valid warm-up candidate
+- **AND** the account becomes blocked before upstream warm-up traffic begins
+- **WHEN** the sender reloads the account state
+- **THEN** it does not send the warm-up request
 
 #### Scenario: Warm-up attempts are durable and deduplicated
 
@@ -103,6 +153,17 @@ remain required.
   candidate
 - **THEN** the database permits at most one persisted attempt for that tuple
 - **AND** later refresh cycles skip that tuple after a prior attempt exists
+
+#### Scenario: Persisted recovery evidence shares the warm-up tuple
+
+- **GIVEN** a scheduler restart causes recovery to use a persisted monthly
+  before/after transition
+- **AND** the before sample meets the configured threshold
+- **WHEN** the recovered active account reaches warm-up evaluation
+- **THEN** warm-up derives the candidate from that same transition's new reset
+  deadline
+- **AND** an existing attempt for the account/monthly/reset tuple prevents
+  another send
 
 #### Scenario: Staggered idle warm-up pre-starts rolling primary windows
 

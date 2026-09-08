@@ -9,9 +9,12 @@
 
 ## 2. Settings and migration
 
-- [x] 2.1 Change repository, ORM, and API defaults/validation to allow `0.0`.
-- [x] 2.2 Add an Alembic migration that converts historical `99.0` defaults to
-  `0.0` and changes the server default.
+- [x] 2.1 Change repository, ORM, and API defaults/validation to allow `0.0`,
+  while mapping the public setting to active storage and the previous column
+  as compatibility-only legacy storage.
+- [x] 2.2 Add an expand/contract Alembic migration that maps historical `99.0`
+  defaults to `0.0` in the active column, copies custom values, leaves the
+  legacy column unchanged, and removes only active storage on downgrade.
 - [x] 2.3 Update frontend schemas, numeric bounds, fixtures, and translated
   descriptions.
 

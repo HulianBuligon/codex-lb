@@ -22,8 +22,10 @@ for operators who want a stricter pre-reset usage gate.
 - Apply the same threshold to the paid-to-Free monthly transition candidate;
   with a zero threshold, a missing pre-refresh sample remains eligible, while a
   positive threshold requires the sample.
-- Migrate existing rows that still contain the historical default `99.0` to
-  `0.0`, preserving explicitly chosen non-default values.
+- Add an expand/contract storage column for the active threshold, mapping the
+  historical `99.0` default to `0.0` while copying other configured values.
+  Keep the legacy column unchanged so previous replicas and rollback remain
+  readable.
 
 ## Capabilities
 
@@ -37,14 +39,14 @@ None.
   again, with `0%` as the default all-resets behavior.
 - `frontend-architecture`: Make the dashboard control accept and explain the
   zero-percent all-resets value.
-- `database-migrations`: Record the active threshold column default and the
-  migration of the historical default value.
+- `database-migrations`: Record the active threshold column, legacy-column
+  compatibility, historical-default mapping, and downgrade behavior.
 
 ## Impact
 
 - Affected code: limit warm-up candidate selection, dashboard settings model,
   settings defaults/validation, frontend schema/control/locales, and one
-  Alembic migration.
+  expand/contract Alembic migration.
 - Affected tests: limit warm-up unit tests, settings API/schema tests, frontend
   component/schema tests, and migration assertions.
 - No new endpoint, environment variable, dependency, or runtime worker is

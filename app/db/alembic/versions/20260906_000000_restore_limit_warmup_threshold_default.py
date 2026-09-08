@@ -16,7 +16,8 @@ down_revision = "20260830_000000_add_quota_warmup_claim_expiry"
 branch_labels = None
 depends_on = None
 
-_COLUMN_NAME = "limit_warmup_exhausted_threshold_percent"
+_LEGACY_COLUMN_NAME = "limit_warmup_exhausted_threshold_percent"
+_ACTIVE_COLUMN_NAME = "limit_warmup_reset_threshold_percent"
 _OLD_DEFAULT = 99.0
 _NEW_DEFAULT = 0.0
 
@@ -31,33 +32,34 @@ def _columns(connection: Connection, table_name: str) -> set[str]:
 def upgrade() -> None:
     bind = op.get_bind()
     columns = _columns(bind, "dashboard_settings")
-    if _COLUMN_NAME not in columns:
+    if _LEGACY_COLUMN_NAME not in columns or _ACTIVE_COLUMN_NAME in columns:
         return
+
+    with op.batch_alter_table("dashboard_settings") as batch_op:
+        batch_op.add_column(
+            sa.Column(
+                _ACTIVE_COLUMN_NAME,
+                sa.Float(),
+                nullable=False,
+                server_default=sa.text(str(_NEW_DEFAULT)),
+            )
+        )
 
     op.execute(
         sa.text(
             "UPDATE dashboard_settings "
-            "SET limit_warmup_exhausted_threshold_percent = :new_default "
-            "WHERE limit_warmup_exhausted_threshold_percent = :old_default"
+            "SET limit_warmup_reset_threshold_percent = "
+            "CASE WHEN limit_warmup_exhausted_threshold_percent = :old_default "
+            "THEN :new_default ELSE limit_warmup_exhausted_threshold_percent END"
         ).bindparams(new_default=_NEW_DEFAULT, old_default=_OLD_DEFAULT)
     )
-    with op.batch_alter_table("dashboard_settings") as batch_op:
-        batch_op.alter_column(
-            _COLUMN_NAME,
-            existing_type=sa.Float(),
-            server_default=sa.text(str(_NEW_DEFAULT)),
-        )
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     columns = _columns(bind, "dashboard_settings")
-    if _COLUMN_NAME not in columns:
+    if _ACTIVE_COLUMN_NAME not in columns:
         return
 
     with op.batch_alter_table("dashboard_settings") as batch_op:
-        batch_op.alter_column(
-            _COLUMN_NAME,
-            existing_type=sa.Float(),
-            server_default=sa.text(str(_OLD_DEFAULT)),
-        )
+        batch_op.drop_column(_ACTIVE_COLUMN_NAME)

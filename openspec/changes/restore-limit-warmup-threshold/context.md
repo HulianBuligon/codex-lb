@@ -31,8 +31,12 @@ meets the configured floor.
 
 ## Migration behavior
 
-The original threshold migration created the column with `99.0` as the server
-default. The new migration changes the server default to `0.0` and converts
-stored rows that are exactly `99.0`, which are indistinguishable from the old
-default, to the new desired default. Any other stored percentage is retained as
-an operator choice.
+The original threshold migration created
+`limit_warmup_exhausted_threshold_percent` with `99.0` as the server default.
+That column must remain unchanged while old replicas may still serve traffic.
+The expand/contract migration therefore adds
+`limit_warmup_reset_threshold_percent` as the active `0.0`-default storage,
+maps legacy `99.0` rows to `0.0`, and copies every other stored percentage.
+The current application exposes the new column through the existing public
+setting name. Downgrade drops only the new column, leaving the old schema and
+data readable.

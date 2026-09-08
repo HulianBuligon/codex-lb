@@ -515,14 +515,20 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "limit_warmup_prompt" in dashboard_columns
             assert "limit_warmup_cooldown_seconds" in dashboard_columns
             assert "limit_warmup_exhausted_threshold_percent" in dashboard_columns
+            assert "limit_warmup_reset_threshold_percent" in dashboard_columns
             assert "limit_warmup_idle_threshold_percent" in dashboard_columns
             assert "limit_warmup_min_available_percent" in dashboard_columns
-            exhausted_threshold = (
+            legacy_threshold, active_threshold = (
                 await session.execute(
-                    text("SELECT limit_warmup_exhausted_threshold_percent FROM dashboard_settings WHERE id=1")
+                    text(
+                        "SELECT limit_warmup_exhausted_threshold_percent, "
+                        "limit_warmup_reset_threshold_percent "
+                        "FROM dashboard_settings WHERE id=1"
+                    )
                 )
-            ).scalar_one()
-            assert exhausted_threshold == 0.0
+            ).one()
+            assert legacy_threshold == 99.0
+            assert active_threshold == 0.0
             idle_threshold = (
                 await session.execute(
                     text("SELECT limit_warmup_idle_threshold_percent FROM dashboard_settings WHERE id=1")
@@ -834,7 +840,7 @@ async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_
     ("initial_threshold", "expected_threshold"),
     [(99.0, 0.0), (50.0, 50.0)],
 )
-async def test_limit_warmup_threshold_migration_updates_only_historical_default(
+async def test_limit_warmup_threshold_migration_adds_active_column_without_mutating_legacy(
     tmp_path,
     initial_threshold: float,
     expected_threshold: float,
@@ -863,22 +869,26 @@ async def test_limit_warmup_threshold_migration_updates_only_historical_default(
         await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
 
         async with session_factory() as session:
-            value = (
+            legacy_value, active_value = (
                 await session.execute(
                     text(
                         """
-                        SELECT limit_warmup_exhausted_threshold_percent
+                        SELECT limit_warmup_exhausted_threshold_percent,
+                               limit_warmup_reset_threshold_percent
                         FROM dashboard_settings
                         WHERE id = 1
                         """
                     )
                 )
-            ).scalar_one()
-            assert value == expected_threshold
+            ).one()
+            assert legacy_value == initial_threshold
+            assert active_value == expected_threshold
 
             columns = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).all()
-            threshold_column = next(row for row in columns if row[1] == "limit_warmup_exhausted_threshold_percent")
-            assert threshold_column[4] in ("0.0", "0")
+            legacy_column = next(row for row in columns if row[1] == "limit_warmup_exhausted_threshold_percent")
+            active_column = next(row for row in columns if row[1] == "limit_warmup_reset_threshold_percent")
+            assert legacy_column[4] in ("99.0", "99")
+            assert active_column[4] in ("0.0", "0")
 
         from alembic import command
 
@@ -887,7 +897,7 @@ async def test_limit_warmup_threshold_migration_updates_only_historical_default(
         await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
 
         async with session_factory() as session:
-            value = (
+            legacy_value = (
                 await session.execute(
                     text(
                         """
@@ -898,27 +908,31 @@ async def test_limit_warmup_threshold_migration_updates_only_historical_default(
                     )
                 )
             ).scalar_one()
-            assert value == expected_threshold
+            assert legacy_value == initial_threshold
 
             columns = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).all()
-            threshold_column = next(row for row in columns if row[1] == "limit_warmup_exhausted_threshold_percent")
-            assert threshold_column[4] in ("99.0", "99")
+            column_names = {row[1] for row in columns}
+            legacy_column = next(row for row in columns if row[1] == "limit_warmup_exhausted_threshold_percent")
+            assert "limit_warmup_reset_threshold_percent" not in column_names
+            assert legacy_column[4] in ("99.0", "99")
 
         await to_thread.run_sync(lambda: command.upgrade(_build_alembic_config(db_url), "head"))
 
         async with session_factory() as session:
-            value = (
+            legacy_value, active_value = (
                 await session.execute(
                     text(
                         """
-                        SELECT limit_warmup_exhausted_threshold_percent
+                        SELECT limit_warmup_exhausted_threshold_percent,
+                               limit_warmup_reset_threshold_percent
                         FROM dashboard_settings
                         WHERE id = 1
                         """
                     )
                 )
-            ).scalar_one()
-            assert value == expected_threshold
+            ).one()
+            assert legacy_value == initial_threshold
+            assert active_value == expected_threshold
     finally:
         await engine.dispose()
 
