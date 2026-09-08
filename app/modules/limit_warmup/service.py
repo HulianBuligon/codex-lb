@@ -450,6 +450,8 @@ class LimitWarmupService:
                         )
                         latest_attempt = completed or skipped
                         latest_attempts[account.id] = latest_attempt
+                    elif candidate.require_no_prior_attempt:
+                        break
                     continue
 
                 attempt = await self._warmup_repo.try_create_attempt(
@@ -462,6 +464,8 @@ class LimitWarmupService:
                     require_no_prior_attempt=candidate.require_no_prior_attempt,
                 )
                 if attempt is None:
+                    if candidate.require_no_prior_attempt:
+                        break
                     continue
                 latest_attempt = attempt
                 latest_attempts[account.id] = attempt

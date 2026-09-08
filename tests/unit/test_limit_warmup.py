@@ -145,6 +145,13 @@ class FakeWarmupRepo:
         return row
 
 
+class LosingInitialClaimWarmupRepo(FakeWarmupRepo):
+    async def try_create_attempt(self, **kwargs: Any) -> AccountLimitWarmup | None:
+        if kwargs.get("require_no_prior_attempt"):
+            return None
+        return await super().try_create_attempt(**kwargs)
+
+
 class FailingCompletionWarmupRepo(FakeWarmupRepo):
     def __init__(self, *, fail_attempt_id: int) -> None:
         super().__init__()
@@ -1332,6 +1339,59 @@ async def test_skipped_primary_attempt_created_in_same_refresh_closes_initial_fr
 
     assert sender.calls == []
     assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("primary", 2000, "skipped")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_available", [True, False], ids=["priced-model", "model-unavailable"])
+async def test_lost_initial_free_claim_stops_before_staggered_idle_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+    model_available: bool,
+) -> None:
+    refresh_started_at = datetime.fromtimestamp(30, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: refresh_started_at)
+    if not model_available:
+        monkeypatch.setattr(
+            "app.modules.limit_warmup.service.get_model_registry",
+            lambda: SimpleNamespace(get_models_with_fallback=lambda: {}),
+        )
+    repo = LosingInitialClaimWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_windows="secondary",
+            limit_warmup_model="gpt-5.1-codex-mini" if model_available else "auto",
+            limit_warmup_staggered_idle_enabled=True,
+        ),
+        before_primary={},
+        before_secondary={},
+        after_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=18_000,
+                recorded_at=refresh_started_at,
+            )
+        },
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=2_592_060,
+                window="monthly",
+                recorded_at=refresh_started_at,
+            )
+        },
+        previous_plan_types={account.id: "free"},
+        refresh_started_at=refresh_started_at,
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
 
 
 @pytest.mark.asyncio
