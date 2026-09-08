@@ -163,6 +163,8 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _LIMIT_FAILOVER_ERROR_CODES,
+    _MAX_LIMIT_FAILOVER_RETRIES,
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _api_key_fair_share_threshold_pct_from_settings,
@@ -3798,7 +3800,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
             using_fresh_replay = True
-        if request_state.replay_count >= 1:
+        quota_replay = request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
+        if request_state.replay_count >= (_MAX_LIMIT_FAILOVER_RETRIES if quota_replay else 1):
             return False
         if request_state.response_event_count > 0:
             return False
@@ -3923,7 +3926,11 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             if transport_only_unanchored_replay:
                 return False
-            if _websocket_request_can_replay_before_visible_output(request_state):
+            quota_replay = request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
+            if _websocket_request_can_replay_before_visible_output(
+                request_state,
+                max_replay_count=_MAX_LIMIT_FAILOVER_RETRIES if quota_replay else 1,
+            ):
                 return True
             if (
                 clean_close_retry_max_count <= 0
@@ -4066,7 +4073,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 and request_state.response_event_count == 0
                 and request_state.clean_close_replay_count < clean_close_retry_max_count
             )
-            if request_state.replay_count >= 1 and not additional_clean_close_retry:
+            quota_replay = request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
+            if (
+                request_state.replay_count >= (_MAX_LIMIT_FAILOVER_RETRIES if quota_replay else 1)
+                and not additional_clean_close_retry
+            ):
                 return False
             account_bound_replay = False
             if request_state.previous_response_id is not None:

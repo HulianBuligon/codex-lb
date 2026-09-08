@@ -41,6 +41,22 @@ const BASE_SETTINGS: DashboardSettings = {
 const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
 
 describe("RoutingSettings", () => {
+  it("renders automatic quota failover enabled and saves disabling it", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    const toggle = screen.getByRole("switch", { name: "Automatic quota failover" });
+    expect(toggle).toBeChecked();
+
+    await user.click(toggle);
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      quotaFailoverEnabled: false,
+    });
+  });
+
   it("saves per-account capacity limits including zero for unlimited", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

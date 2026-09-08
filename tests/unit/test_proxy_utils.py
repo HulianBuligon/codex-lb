@@ -23416,6 +23416,64 @@ async def test_connect_proxy_websocket_uses_transport_aware_request_deadline(
 
 
 @pytest.mark.asyncio
+async def test_connect_proxy_websocket_delays_quota_replacement_before_open(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected_account = _make_account("acc_ws_quota_rejected")
+    replacement_account = _make_account("acc_ws_quota_replacement")
+    upstream = SimpleNamespace()
+    delays: list[float] = []
+
+    class RecordingScheduler:
+        async def sleep(self, delay: float, result: object = None) -> object:
+            delays.append(delay)
+            return result
+
+    monkeypatch.setattr(websocket_mixin_module, "scheduler_for", lambda _owner: RecordingScheduler())
+    monkeypatch.setattr(
+        service,
+        "_select_websocket_connect_account",
+        AsyncMock(return_value=replacement_account),
+    )
+    open_attempt = AsyncMock(return_value=(replacement_account, upstream))
+    monkeypatch.setattr(service, "_try_open_websocket_connect_attempt", open_attempt)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_quota_delay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_stage="reattach",
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"hello"}',
+        replay_count=1,
+        excluded_account_ids={rejected_account.id},
+        precreated_replay_reason="usage_limit_reached",
+        precreated_replay_account_id=rejected_account.id,
+    )
+    request_state.quota_failover_delay_pending = True
+
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+    )
+
+    assert selected_account is replacement_account
+    assert selected_upstream is upstream
+    assert delays == [5.0]
+    open_attempt.assert_awaited_once()
+    assert request_state.quota_failover_delay_pending is False
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_logs_preconnect_failure(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -40156,6 +40214,114 @@ async def test_stream_post_refresh_401_fails_over_instead_of_retrying_same_accou
         account_a.chatgpt_account_id,
         account_b.chatgpt_account_id,
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_post_refresh_quota_respects_disabled_failover(monkeypatch):
+    settings = _make_proxy_settings()
+    settings.quota_failover_enabled = False
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_stream_post_refresh_quota_a")
+    account_b = _make_account("acc_stream_post_refresh_quota_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    stream_account_ids: list[str | None] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        seen_excluded_account_ids.append(excluded_account_ids)
+        return AccountSelection(
+            account=account_b if excluded_account_ids else account_a,
+            error_message=None,
+        )
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        stream_account_ids.append(account_id)
+        if len(stream_account_ids) == 1:
+            raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token invalidated"))
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+            )
+            yield ""  # pragma: no cover
+        yield 'data: {"type":"response.completed","response":{"id":"unexpected_quota_failover"}}\n\n'
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_a, account_b]))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-post-refresh-quota"})]
+
+    assert len(chunks) == 1
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"]["code"] == "usage_limit_reached"
+    assert seen_excluded_account_ids == [set()]
+    assert stream_account_ids == [account_a.chatgpt_account_id] * 2
+
+
+@pytest.mark.asyncio
+async def test_stream_post_refresh_quota_uses_bounded_delayed_failover(monkeypatch):
+    settings = _make_proxy_settings()
+    settings.quota_failover_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_stream_post_refresh_quota_enabled_a")
+    account_b = _make_account("acc_stream_post_refresh_quota_enabled_b")
+    stream_account_ids: list[str | None] = []
+    delays: list[float] = []
+
+    class RecordingScheduler:
+        def __getattr__(self, name):
+            return getattr(REAL_SCHEDULER, name)
+
+        async def sleep(self, delay: float, result: object = None) -> object:
+            delays.append(delay)
+            return result
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(streaming_retry_module, "scheduler_for", lambda _owner: RecordingScheduler())
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        return AccountSelection(account=account_b if account_a.id in excluded else account_a, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        stream_account_ids.append(account_id)
+        if len(stream_account_ids) == 1:
+            raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token invalidated"))
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+            )
+            yield ""  # pragma: no cover
+        yield 'data: {"type":"response.completed","response":{"id":"resp_post_refresh_quota_ok"}}\n\n'
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_a, account_b]))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-post-refresh-quota"})]
+
+    event = json.loads(chunks[0].split("data: ", 1)[1])
+    assert event["type"] == "response.completed"
+    assert event["response"]["id"] == "resp_post_refresh_quota_ok"
+    assert stream_account_ids == [
+        account_a.chatgpt_account_id,
+        account_a.chatgpt_account_id,
+        account_b.chatgpt_account_id,
+    ]
+    assert delays == [5.0]
 
 
 @pytest.mark.asyncio

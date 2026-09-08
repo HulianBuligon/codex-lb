@@ -22,6 +22,7 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
+_QUOTA_FAILOVER = "20260908_030000_add_quota_failover_setting"
 
 
 @dataclass
@@ -152,7 +153,9 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[
 def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tmp_path: Path) -> None:
     config = _build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.sqlite'}")
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == [_MERGE]
+    assert script.get_heads() == [_QUOTA_FAILOVER]
+    quota_failover = script.get_revision(_QUOTA_FAILOVER)
+    assert quota_failover is not None and quota_failover.down_revision == _MERGE
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS
     for revision in _PARENTS:
@@ -172,10 +175,11 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
         if _OVERFLOW not in database.starting_revisions:
             row["subscription_overflow_source_id"] = None
             row["subscription_overflow_drain_until"] = None
+        row["quota_failover_enabled"] = 1
 
     result = run_upgrade(database.url, "head", bootstrap_legacy=False)
-    assert result.current_revision == _MERGE
-    assert _revisions(database.engine) == (_MERGE,)
+    assert result.current_revision == _QUOTA_FAILOVER
+    assert _revisions(database.engine) == (_QUOTA_FAILOVER,)
     merged = _state(database.engine)
     assert merged["settings"] == expected_settings
     assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
@@ -195,14 +199,20 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     for parent in _PARENTS:
         command.downgrade(_build_alembic_config(database.url), parent)
         # A direct downgrade to either immediate parent executes only the
-        # no-op merge downgrade. Alembic records both unmerged parent heads;
-        # it does not execute either parent's schema-removing downgrade.
+        # no-op merge downgrade after removing the quota setting. Alembic
+        # records both unmerged parent heads; it does not execute either
+        # parent's schema-removing downgrade.
         assert _revisions(database.engine) == tuple(sorted(_PARENTS))
-        assert _state(database.engine) == populated
-        assert check_schema_drift(database.url) == ()
+        downgraded = _state(database.engine)
+        assert downgraded["settings"] == [
+            {key: value for key, value in row.items() if key != "quota_failover_enabled"}
+            for row in populated["settings"]
+        ]
+        assert downgraded["pins"] == populated["pins"]
+        assert downgraded["retry"] == populated["retry"]
 
         result = run_upgrade(database.url, "head", bootstrap_legacy=False)
-        assert result.current_revision == _MERGE
-        assert _revisions(database.engine) == (_MERGE,)
+        assert result.current_revision == _QUOTA_FAILOVER
+        assert _revisions(database.engine) == (_QUOTA_FAILOVER,)
         assert _state(database.engine) == populated
         assert check_schema_drift(database.url) == ()

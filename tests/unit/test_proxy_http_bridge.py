@@ -5447,7 +5447,7 @@ async def test_http_bridge_malformed_tool_lifecycle_persists_unknown_manifest(
     ("upstream_code", "expected_retry_error_code"),
     [
         ("invalid_request_error", "server_is_overloaded"),
-        ("rate_limit_exceeded", "rate_limit_exceeded"),
+        ("model_at_capacity", "server_is_overloaded"),
     ],
 )
 @pytest.mark.asyncio
@@ -6937,7 +6937,7 @@ async def test_http_bridge_model_capacity_waits_before_retrying_safe_injected_an
                 "status": 429,
                 "error": {
                     "type": "rate_limit_error",
-                    "code": "rate_limit_exceeded",
+                    "code": "model_at_capacity",
                     "message": capacity_message,
                 },
             },

@@ -6,7 +6,7 @@ import json
 import logging
 import sys
 from dataclasses import replace
-from typing import Any, AsyncGenerator, AsyncIterator, Mapping, cast
+from typing import Any, AsyncGenerator, AsyncIterator, Iterator, Mapping, cast
 
 import aiohttp
 
@@ -23,6 +23,7 @@ from app.core.clients.proxy import (
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
     SYNTHETIC_TRANSPORT_FAILURE_CODES,
+    ResponseFailedEvent,
     openai_error,
     synthetic_transport_failure_event,
 )
@@ -51,9 +52,13 @@ from app.modules.proxy._service.streaming.protocol import _StreamingServiceProto
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
+    _LIMIT_FAILOVER_DELAY_SECONDS,
+    _LIMIT_FAILOVER_ERROR_CODES,
     _LOCAL_ACCOUNT_CAP_ERROR_CODES,
+    _MAX_LIMIT_FAILOVER_RETRIES,
     _account_capacity_wait_payload,
     _account_selection_recovery_sleep_seconds,
+    _is_usage_exhaustion_error,
     _request_log_client_fields,
     _RetryableStreamError,
     _signal_propagated_capacity_startup_wait,
@@ -96,6 +101,10 @@ _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT = "smart"
 _HTTP_DOWNSTREAM_TRANSPORT_POLICIES = frozenset({"smart", "always_http", "always_websocket", "pinned"})
+# A quota/rate-limit response is the only upstream failure that may trigger
+# the bounded account handoff below.  Keep the retry budget local to one
+# request so a malformed or persistently failing pool cannot turn a client
+# request into an unbounded account probe.
 logger = logging.getLogger(__name__)
 
 
@@ -110,6 +119,39 @@ def _http_downstream_request_is_sticky(payload: ResponsesRequest, headers: Mappi
         or _sticky_key_from_session_header(headers) is not None
         or _sticky_key_from_turn_state_header(headers) is not None
     )
+
+
+def _is_limit_failover_error(code: str | None) -> bool:
+    return code in _LIMIT_FAILOVER_ERROR_CODES
+
+
+def _is_previsible_limit_error(exc: ProxyResponseError | _RetryableStreamError, *, downstream_visible: bool) -> bool:
+    if downstream_visible:
+        return False
+    if isinstance(exc, _RetryableStreamError):
+        return _is_limit_failover_error(exc.code)
+    error = _parse_openai_error(exc.payload)
+    error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+    return _is_limit_failover_error(error_code)
+
+
+def _response_failed_event_from_upstream_error(
+    code: str,
+    error: UpstreamError,
+    *,
+    response_id: str,
+) -> ResponseFailedEvent:
+    event = response_failed_event(
+        code,
+        error.get("message") or "Upstream error",
+        response_id=response_id,
+    )
+    detail = event["response"]["error"]
+    for key in ("resets_at", "resets_in_seconds"):
+        value = error.get(key)
+        if value is not None:
+            detail[key] = value
+    return event
 
 
 _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR = "_codex_lb_post_refresh_transient_exhausted"
@@ -324,6 +366,7 @@ class _StreamingRetryMixin:
             request_transport=request_transport,
         )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        quota_failover_enabled = getattr(settings, "quota_failover_enabled", True)
         upstream_transport_policy_label = "explicit" if upstream_stream_transport_override is not None else "configured"
         upstream_transport_sticky = _http_downstream_request_is_sticky(payload, headers)
         preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(headers)
@@ -452,6 +495,16 @@ class _StreamingRetryMixin:
         excluded_account_ids: set[str] = set()
         transient_failed_account_id: str | None = None
         hard_affinity_same_owner_retry_attempted = False
+        limit_failover_retries = 0
+        limit_failover_delay_pending = False
+
+        def _account_attempt_indices() -> Iterator[int]:
+            """Extend the outer attempt budget only after a quota failover."""
+            attempt_index = 0
+            while attempt_index < max_attempts + limit_failover_retries:
+                yield attempt_index
+                attempt_index += 1
+
         deferred_capacity_account: Account | None = None
         deferred_capacity_lease: AccountLease | None = None
         preferred_account_id: str | None = None
@@ -796,6 +849,39 @@ class _StreamingRetryMixin:
                 account_id,
             )
             return True
+
+        async def _retire_failed_soft_affinity(account_id: str) -> None:
+            """Drop only this request's soft cache pin after quota exhaustion."""
+            if affinity.kind not in (StickySessionKind.PROMPT_CACHE, StickySessionKind.STICKY_THREAD):
+                return
+            sticky_key = affinity.key
+            if not isinstance(sticky_key, str) or not sticky_key:
+                return
+            try:
+                async with proxy._repo_factory() as repos:
+                    retired = await repos.sticky_sessions.restore_if_current(
+                        sticky_key,
+                        kind=affinity.kind,
+                        expected_account_id=account_id,
+                        restore_account_id=None,
+                    )
+                if retired:
+                    logger.info(
+                        "Retired soft sticky owner after usage exhaustion request_id=%s account_id=%s kind=%s",
+                        request_id,
+                        account_id,
+                        affinity.kind.value,
+                    )
+            except Exception:
+                # A best-effort cache-pin cleanup must never turn a recoverable
+                # account handoff into a terminal request failure.
+                logger.warning(
+                    "Failed to retire soft sticky owner after usage exhaustion request_id=%s account_id=%s kind=%s",
+                    request_id,
+                    account_id,
+                    affinity.kind.value,
+                    exc_info=True,
+                )
 
         async def _stream_post_refresh_with_capacity_recovery(
             account: Account,
@@ -1214,7 +1300,7 @@ class _StreamingRetryMixin:
             )
             require_preferred_account = require_preferred_account or turn_state_owner_account_id is not None
             file_required_preferred_account = rewritten_file_account_id is not None
-            for attempt in range(max_attempts):
+            for attempt in _account_attempt_indices():
                 remaining_budget = proxy._remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     await _drain_pending_post_refresh_penalty_on_terminal(settlement)
@@ -1570,9 +1656,9 @@ class _StreamingRetryMixin:
                         raise last_transient_exc
                     if last_retryable_stream_error is not None:
                         error_message = str(last_retryable_stream_error.error.get("message") or "Upstream error")
-                        event = response_failed_event(
+                        event = _response_failed_event_from_upstream_error(
                             last_retryable_stream_error.code,
-                            error_message,
+                            last_retryable_stream_error.error,
                             response_id=request_id,
                         )
                         yield format_sse_event(event)
@@ -1795,6 +1881,13 @@ class _StreamingRetryMixin:
                         return
                 try:
                     remaining_budget = proxy._remaining_budget_seconds(deadline)
+                    if limit_failover_delay_pending:
+                        if remaining_budget <= _LIMIT_FAILOVER_DELAY_SECONDS:
+                            remaining_budget = 0.0
+                        else:
+                            await scheduler.sleep(_LIMIT_FAILOVER_DELAY_SECONDS)
+                            limit_failover_delay_pending = False
+                            remaining_budget = proxy._remaining_budget_seconds(deadline)
                     if remaining_budget <= 0:
                         _facade().logger.warning(
                             "Proxy request budget exhausted before freshness check "
@@ -2084,7 +2177,9 @@ class _StreamingRetryMixin:
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                         return
                     transient_retries = 0
-                    allow_retry_flag = attempt < max_attempts - 1
+                    allow_retry_flag = attempt < max_attempts - 1 or (
+                        quota_failover_enabled and limit_failover_retries < _MAX_LIMIT_FAILOVER_RETRIES
+                    )
                     while True:
                         stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
                             proxy._remaining_budget_seconds(deadline),
@@ -2142,11 +2237,27 @@ class _StreamingRetryMixin:
                                     if register_payload_owner:
                                         payload_replay_required_account_id = account.id
                                 except BaseException as exc:
-                                    if register_payload_owner and not (
-                                        isinstance(exc, ProxyResponseError)
-                                        and is_confirmed_pre_dispatch_transport_error(exc)
-                                    ):
-                                        payload_replay_required_account_id = account.id
+                                    if register_payload_owner:
+                                        # A pre-visible quota response proves
+                                        # that this request was rejected before
+                                        # any response bytes were produced. It
+                                        # must not become a request-local hard
+                                        # owner, otherwise the next account
+                                        # selection is forced straight back to
+                                        # the exhausted account and the client
+                                        # sees a terminal 429.
+                                        if not (
+                                            isinstance(exc, ProxyResponseError)
+                                            and is_confirmed_pre_dispatch_transport_error(exc)
+                                        ) and not (
+                                            quota_failover_enabled
+                                            and isinstance(exc, (ProxyResponseError, _RetryableStreamError))
+                                            and _is_previsible_limit_error(
+                                                exc,
+                                                downstream_visible=settlement.downstream_visible,
+                                            )
+                                        ):
+                                            payload_replay_required_account_id = account.id
                                     raise
                             finally:
                                 close_task = scheduler.create_task(
@@ -2430,12 +2541,24 @@ class _StreamingRetryMixin:
                                     phase="first_event",
                                 )
                                 if getattr(base_settings, "deterministic_failover_enabled", True):
+                                    candidates_remaining = (
+                                        _MAX_LIMIT_FAILOVER_RETRIES - limit_failover_retries
+                                        if quota_failover_enabled and _is_limit_failover_error(code)
+                                        else max_attempts - attempt - 1
+                                    )
                                     action = failover_decision(
                                         failure_class=classified["failure_class"],
                                         downstream_visible=settlement.downstream_visible,
-                                        candidates_remaining=max_attempts - attempt - 1,
+                                        candidates_remaining=candidates_remaining,
                                     )
                                 else:
+                                    action = "surface"
+                                is_limit_error = _is_limit_failover_error(code)
+                                limit_failure = quota_failover_enabled and is_limit_error
+                                usage_exhaustion = limit_failure and _is_usage_exhaustion_error(code, error_message)
+                                if is_limit_error and (
+                                    not quota_failover_enabled or limit_failover_retries >= _MAX_LIMIT_FAILOVER_RETRIES
+                                ):
                                     action = "surface"
                                 _facade().logger.info(
                                     "Failover decision request_id=%s transport=stream account_id=%s "
@@ -2458,6 +2581,20 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     excluded_account_ids.add(account.id)
+                                    if limit_failure:
+                                        limit_failover_retries += 1
+                                        limit_failover_delay_pending = True
+                                        # The payload owner is request-local
+                                        # dispatch evidence, not durable
+                                        # Responses ownership. Clear it only
+                                        # for a pre-visible limit rejection;
+                                        # hard previous-response/file/turn
+                                        # pins remain governed by their own
+                                        # fail-closed checks above.
+                                        if payload_replay_required_account_id == account.id:
+                                            payload_replay_required_account_id = None
+                                        if usage_exhaustion:
+                                            await _retire_failed_soft_affinity(account.id)
                                     _move_verified_fresh_replay_from_owner(
                                         account_id=account.id,
                                         outcome="owner_previsible_failure",
@@ -2469,6 +2606,8 @@ class _StreamingRetryMixin:
                                     code,
                                     http_status=tex.status_code,
                                 )
+                                if usage_exhaustion:
+                                    await _retire_failed_soft_affinity(account.id)
                                 raise
                             error_payload: UpstreamError = (
                                 tex.error
@@ -2603,16 +2742,39 @@ class _StreamingRetryMixin:
                         continue
                     await _handle_or_defer_keyed_stream_health(account, exc.error, exc.code)
                     last_retryable_stream_error = exc
+                    if _is_limit_failover_error(exc.code) and not quota_failover_enabled:
+                        yield format_sse_event(
+                            _response_failed_event_from_upstream_error(
+                                exc.code,
+                                exc.error,
+                                response_id=request_id,
+                            )
+                        )
+                        return
                     if exc.exclude_account:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
+                    if quota_failover_enabled and _is_limit_failover_error(exc.code):
+                        if _is_usage_exhaustion_error(exc.code, exc.error.get("message")):
+                            await _retire_failed_soft_affinity(account.id)
+                        if limit_failover_retries >= _MAX_LIMIT_FAILOVER_RETRIES:
+                            yield format_sse_event(
+                                _response_failed_event_from_upstream_error(
+                                    exc.code,
+                                    exc.error,
+                                    response_id=request_id,
+                                )
+                            )
+                            return
+                        limit_failover_retries += 1
+                        limit_failover_delay_pending = True
                     _move_verified_fresh_replay_from_owner(
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
                     )
                     continue
-                except _TerminalStreamError:
+                except _TerminalStreamError as exc:
                     if settlement.settlement_order_required:
                         await _finalize_terminal_settlement_after_downstream_close(
                             settlement,
@@ -2627,6 +2789,11 @@ class _StreamingRetryMixin:
                                 _stream_settlement_error_payload(settlement),
                                 settlement.error_code or "upstream_error",
                             )
+                    if quota_failover_enabled and _is_usage_exhaustion_error(
+                        exc.code,
+                        exc.error.get("message"),
+                    ):
+                        await _retire_failed_soft_affinity(account.id)
                     return
                 except ProxyResponseError as exc:
                     if _must_abort_native_transport_failure(
@@ -3068,6 +3235,55 @@ class _StreamingRetryMixin:
                                 break
                             current_error_payload = _upstream_error_from_openai(error)
                             current_error_code = error_code or "upstream_error"
+                            post_refresh_limit_error = _is_limit_failover_error(current_error_code)
+                            if post_refresh_limit_error:
+                                await _handle_or_defer_keyed_stream_health(
+                                    account,
+                                    current_error_payload,
+                                    current_error_code,
+                                    http_status=retry_exc.status_code,
+                                )
+                                usage_exhaustion = _is_usage_exhaustion_error(
+                                    current_error_code,
+                                    current_error_payload.get("message"),
+                                )
+                                if usage_exhaustion:
+                                    await _retire_failed_soft_affinity(account.id)
+                                last_retryable_stream_error = _RetryableStreamError(
+                                    current_error_code,
+                                    current_error_payload,
+                                    exclude_account=True,
+                                )
+                                _move_verified_fresh_replay_from_owner(
+                                    account_id=account.id,
+                                    outcome="owner_post_refresh_quota_failure",
+                                )
+                                can_retry_limit = bool(
+                                    quota_failover_enabled
+                                    and limit_failover_retries < _MAX_LIMIT_FAILOVER_RETRIES
+                                    and not require_preferred_account
+                                )
+                                if can_retry_limit:
+                                    await _release_tracked_stream_lease(current_account_lease)
+                                    current_account_lease = None
+                                    excluded_account_ids.add(account.id)
+                                    affinity = replace(affinity, reallocate_sticky=True)
+                                    limit_failover_retries += 1
+                                    limit_failover_delay_pending = True
+                                    continue
+                                await _drain_pending_post_refresh_penalty_on_terminal(settlement)
+                                if propagate_http_errors:
+                                    raise
+                                event = response_failed_event(
+                                    current_error_code,
+                                    current_error_payload.get("message") or "Upstream limit reached",
+                                    error_type=(error.type if error else None) or "server_error",
+                                    response_id=request_id,
+                                    error_param=error.param_state if error else None,
+                                )
+                                _apply_error_metadata(event["response"]["error"], error)
+                                yield format_sse_event(event)
+                                return
                             classified = classify_upstream_failure(
                                 error_code=current_error_code,
                                 error=current_error_payload,

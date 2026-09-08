@@ -14,6 +14,7 @@ describe("DashboardSettingsSchema", () => {
   it("parses settings payload", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
+      quotaFailoverEnabled: false,
       upstreamStreamTransport: "auto",
       upstreamProxyRoutingEnabled: true,
       upstreamProxyDefaultPoolId: "pool_1",
@@ -57,6 +58,7 @@ describe("DashboardSettingsSchema", () => {
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
+    expect(parsed.quotaFailoverEnabled).toBe(false);
     expect(parsed.upstreamStreamTransport).toBe("auto");
     expect(parsed.upstreamProxyRoutingEnabled).toBe(true);
     expect(parsed.upstreamProxyDefaultPoolId).toBe("pool_1");
@@ -105,6 +107,7 @@ describe("DashboardSettingsSchema", () => {
       hideUpstreamQuotaFromApiKeys: false,
     });
 
+    expect(parsed.quotaFailoverEnabled).toBe(true);
     expect(parsed.upstreamStreamTransport).toBe("auto");
     expect(parsed.upstreamProxyRoutingEnabled).toBe(false);
     expect(parsed.upstreamProxyDefaultPoolId).toBeNull();
@@ -180,6 +183,7 @@ describe("SettingsUpdateRequestSchema", () => {
   it("accepts required fields and optional updates", () => {
     const parsed = SettingsUpdateRequestSchema.parse({
       stickyThreadsEnabled: false,
+      quotaFailoverEnabled: false,
       upstreamStreamTransport: "websocket",
       upstreamProxyRoutingEnabled: true,
       upstreamProxyDefaultPoolId: null,
@@ -219,6 +223,7 @@ describe("SettingsUpdateRequestSchema", () => {
     });
 
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
+    expect(parsed.quotaFailoverEnabled).toBe(false);
     expect(parsed.dashboardSessionTtlSeconds).toBe(7200);
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(90);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);

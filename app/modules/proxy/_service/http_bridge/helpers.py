@@ -130,6 +130,7 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _LIMIT_FAILOVER_DELAY_SECONDS,
     _REQUEST_TRANSPORT_HTTP,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _http_bridge_session_supports_service_tier,
@@ -3413,6 +3414,19 @@ def _http_bridge_reconnect_connect_failure(
     if isinstance(exc, ProxyResponseError):
         return exc
     raise exc
+
+
+def _require_quota_failover_delay_budget(remaining_budget: float) -> None:
+    if remaining_budget > _LIMIT_FAILOVER_DELAY_SECONDS:
+        return
+    raise ProxyResponseError(
+        504,
+        openai_error(
+            "upstream_request_timeout",
+            "Proxy request budget exhausted before quota failover delay",
+            error_type="server_error",
+        ),
+    )
 
 
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:

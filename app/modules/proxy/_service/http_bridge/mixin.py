@@ -124,6 +124,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _refresh_reused_http_bridge_session_with_handoff,
     _register_http_bridge_turn_state_aliases_locked,
     _require_http_bridge_bound_account_not_excluded,
+    _require_quota_failover_delay_budget,
     _reserve_http_bridge_unanchored_handoff,
     _settle_failed_http_bridge_creation,
     _turn_keys,
@@ -160,6 +161,8 @@ from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _LIMIT_FAILOVER_DELAY_SECONDS,
+    _LIMIT_FAILOVER_ERROR_CODES,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_precreated_replay_fallback,
     _complete_http_bridge_handoff,
@@ -2264,6 +2267,12 @@ class _HTTPBridgeMixin(
                     force=force_refresh,
                     timeout_seconds=self._remaining_budget_seconds(deadline),
                 )
+                if (
+                    request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
+                    and account.id != session.account.id
+                ):
+                    _require_quota_failover_delay_budget(self._remaining_budget_seconds(deadline))
+                    await scheduler_for(self).sleep(_LIMIT_FAILOVER_DELAY_SECONDS)
                 if force_refresh and request_state.force_refresh_account_id == account.id:
                     request_state.force_refresh_account_id = None
                 connect_headers = _websocket_safe_headers_with_turn_state(
