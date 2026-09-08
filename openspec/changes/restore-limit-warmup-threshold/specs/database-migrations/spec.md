@@ -13,10 +13,19 @@ default; the current application SHALL expose that active value through the
 existing `limit_warmup_exhausted_threshold_percent` settings contract.
 
 The upgrade migration SHALL copy each legacy value into the active column,
-except that the historical `99.0` default SHALL become the new `0.0` default.
-It MUST NOT rewrite the legacy column or its server default. Downgrade SHALL
-remove only the active column so the previous application schema can continue
-to read every legacy row.
+except that a historical `99.0` default with
+`dashboard_settings.version = 1` and `created_at = updated_at` SHALL become the
+new `0.0` default. A legacy `99.0` with either evidence of an update SHALL
+remain `99.0`. Upgrade MUST NOT rewrite the legacy column or its server
+default.
+
+During mixed-version operation, the current application SHALL write both
+columns in one settings update. Positive active values SHALL use the same
+legacy value, while active `0.0` SHALL use legacy `99.0`. A legacy-only update
+that changes the legacy value without changing the active value SHALL copy the
+new legacy value into active storage. Downgrade SHALL copy the latest active
+value back into legacy storage, representing active `0.0` as legacy `99.0`,
+before it removes the active column.
 
 #### Scenario: Warm-up attempt is unique per reset
 
@@ -32,13 +41,25 @@ to read every legacy row.
   `99.0` server default
 - **AND** the active reset-threshold percent has a `0.0` server default
 
-#### Scenario: Historical default is expanded without mutating legacy data
+#### Scenario: Pristine historical default is expanded without mutating legacy data
 
 - **GIVEN** an existing dashboard settings row has legacy
   `limit_warmup_exhausted_threshold_percent = 99.0`
+- **AND** its settings version is `1`
+- **AND** its creation and update timestamps are equal
 - **WHEN** the migration is applied
 - **THEN** `limit_warmup_reset_threshold_percent` is `0.0`
 - **AND** the legacy value and its `99.0` server default remain unchanged
+
+#### Scenario: Configured 99 percent is preserved
+
+- **GIVEN** an existing dashboard settings row has legacy
+  `limit_warmup_exhausted_threshold_percent = 99.0`
+- **AND** its settings version is greater than `1` or its creation and update
+  timestamps differ
+- **WHEN** the migration is applied
+- **THEN** `limit_warmup_reset_threshold_percent` is `99.0`
+- **AND** the legacy value remains unchanged
 
 #### Scenario: Explicit threshold is copied into active storage
 
@@ -48,22 +69,37 @@ to read every legacy row.
 - **THEN** the active reset-threshold value equals that configured value
 - **AND** the legacy value remains unchanged
 
-#### Scenario: Zero is persisted only in active storage
+#### Scenario: Current replica dual-writes a positive threshold
+
+- **WHEN** the settings API receives
+  `limitWarmupExhaustedThresholdPercent = 50`
+- **THEN** both threshold columns persist `50.0`
+
+#### Scenario: Zero uses a legacy-compatible representation
 
 - **WHEN** the settings API receives
   `limitWarmupExhaustedThresholdPercent = 0`
 - **THEN** the update is accepted and persisted in
   `limit_warmup_reset_threshold_percent`
-- **AND** the compatibility-only legacy column remains readable by previous
-  replicas
+- **AND** the compatibility-only legacy column persists `99.0`
+
+#### Scenario: Legacy-only mixed-version write updates active storage
+
+- **GIVEN** the expand migration is active
+- **WHEN** a previous replica changes only
+  `limit_warmup_exhausted_threshold_percent`
+- **THEN** `limit_warmup_reset_threshold_percent` is set to that same value
 
 #### Scenario: Downgrade preserves the previous application contract
 
 - **GIVEN** the active reset-threshold column was added by this change
+- **AND** its latest value differs from the compatibility column
 - **WHEN** the migration is downgraded to its parent revision
 - **THEN** `limit_warmup_reset_threshold_percent` is removed
-- **AND** `limit_warmup_exhausted_threshold_percent` retains its prior value
-  and `99.0` server default
+- **AND** a positive active value is copied exactly into
+  `limit_warmup_exhausted_threshold_percent`
+- **AND** an active `0.0` is represented there as `99.0`
+- **AND** the legacy `99.0` server default remains unchanged
 
 #### Scenario: Warm-up request logs remain separable from user traffic
 

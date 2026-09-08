@@ -23,9 +23,12 @@ for operators who want a stricter pre-reset usage gate.
   with a zero threshold, a missing pre-refresh sample remains eligible, while a
   positive threshold requires the sample.
 - Add an expand/contract storage column for the active threshold, mapping the
-  historical `99.0` default to `0.0` while copying other configured values.
-  Keep the legacy column unchanged so previous replicas and rollback remain
-  readable.
+  historical `99.0` default to `0.0` only for version-1 settings rows whose
+  creation/update timestamps still match, while preserving configured `99.0`
+  and copying other values.
+- Keep mixed-version replicas synchronized: current replicas dual-write both
+  columns, legacy-only writes update active storage, and downgrade copies the
+  latest active value back into the legacy representation before contraction.
 
 ## Capabilities
 
@@ -45,8 +48,9 @@ None.
 ## Impact
 
 - Affected code: limit warm-up candidate selection, dashboard settings model,
-  settings defaults/validation, frontend schema/control/locales, and one
-  expand/contract Alembic migration.
+  settings defaults/validation and dual-write behavior, frontend
+  schema/control/locales, and one expand/contract Alembic migration with
+  mixed-version synchronization.
 - Affected tests: limit warm-up unit tests, settings API/schema tests, frontend
   component/schema tests, and migration assertions.
 - No new endpoint, environment variable, dependency, or runtime worker is

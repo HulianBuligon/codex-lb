@@ -247,6 +247,28 @@ async def test_settings_api_get_and_update(async_client):
 
 @pytest.mark.asyncio
 async def test_settings_api_accepts_zero_limit_warmup_threshold(async_client):
+    configured_response = await async_client.put(
+        "/api/settings",
+        json={"limitWarmupExhaustedThresholdPercent": 50},
+    )
+
+    assert configured_response.status_code == 200
+    assert configured_response.json()["limitWarmupExhaustedThresholdPercent"] == 50.0
+
+    async with SessionLocal() as session:
+        configured_legacy_value, configured_active_value = (
+            await session.execute(
+                text(
+                    "SELECT limit_warmup_exhausted_threshold_percent, "
+                    "limit_warmup_reset_threshold_percent "
+                    "FROM dashboard_settings WHERE id = 1"
+                )
+            )
+        ).one()
+
+    assert configured_legacy_value == 50.0
+    assert configured_active_value == 50.0
+
     response = await async_client.put(
         "/api/settings",
         json={"limitWarmupExhaustedThresholdPercent": 0},

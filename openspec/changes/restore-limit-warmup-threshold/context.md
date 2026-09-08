@@ -36,7 +36,18 @@ The original threshold migration created
 That column must remain unchanged while old replicas may still serve traffic.
 The expand/contract migration therefore adds
 `limit_warmup_reset_threshold_percent` as the active `0.0`-default storage,
-maps legacy `99.0` rows to `0.0`, and copies every other stored percentage.
+maps a legacy `99.0` to `0.0` only when `dashboard_settings.version = 1` and
+`created_at = updated_at` jointly identify a pristine settings row, and copies
+every other stored percentage. A `99.0` row with either evidence of an update
+is conservatively preserved as an explicit choice because migration-time data
+cannot distinguish a threshold edit from an unrelated settings edit.
+
 The current application exposes the new column through the existing public
-setting name. Downgrade drops only the new column, leaving the old schema and
-data readable.
+setting name and dual-writes the compatibility column. Positive values are
+stored identically in both columns; active `0.0` uses legacy `99.0`, which the
+previous positive-only schema can read. A database trigger copies a changed
+legacy value into active storage only when the same statement did not change
+the active value, allowing old replicas to participate without overriding a
+new replica's dual-write. Downgrade first maps the latest active value back to
+legacy storage (`0.0` becomes `99.0`; positive values remain unchanged), then
+removes the trigger and active column.
