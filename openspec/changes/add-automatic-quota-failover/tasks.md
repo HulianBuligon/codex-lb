@@ -38,5 +38,5 @@
 
 ## 5. Publication
 
-- [ ] 5.1 Push the feature branch to the contributor fork and open a PR against
+- [x] 5.1 Push the feature branch to the contributor fork and open a PR against
   `Soju06/codex-lb:main` using the repository template.
