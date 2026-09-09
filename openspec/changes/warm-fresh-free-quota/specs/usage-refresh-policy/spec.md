@@ -61,3 +61,10 @@ gates SHALL continue to apply.
 - **GIVEN** two replicas read no prior attempt for the same already-Free account
 - **WHEN** both atomically claim current zero-use monthly samples with different sliding reset deadlines
 - **THEN** exactly one initial monthly attempt is inserted and sent
+
+#### Scenario: Rolling upgrades preserve claim serialization
+
+- **GIVEN** an older PostgreSQL replica holds the existing per-window advisory lock and has an uncommitted warm-up attempt
+- **WHEN** a new replica claims an initial warm-up for the same account
+- **THEN** the initial claim MUST wait for the older transaction and reject insertion after its attempt commits, regardless of window or reset deadline
+- **AND** ordinary new-replica claims MUST retain per-window serialization with older replicas

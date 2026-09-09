@@ -55,6 +55,12 @@ SQLite evaluates it under the database writer lock. PostgreSQL serializes all
 warm-up claims for the same account with a shared per-account advisory
 transaction lock before evaluating the conditional insert.
 
+During rolling upgrades, claims also retain the existing per-window advisory
+lock protocol. An initial claim acquires all supported window locks in a fixed
+order (`monthly`, `primary`, `primary_idle`, `secondary`) before checking for
+prior attempts, so an in-flight ordinary claim from an older replica commits
+before that check. Ordinary claims acquire their own window lock as before.
+
 The attempt keeps its account, monthly window, and observed reset deadline
 identity. Any durable attempt for the account closes the initial path,
 including one created earlier in the same refresh or concurrently with a

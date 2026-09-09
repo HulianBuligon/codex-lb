@@ -101,6 +101,17 @@ class LimitWarmupRepository:
                         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
                         {"key": f"limit_warmup:{account_id}"},
                     )
+                    # Older replicas use only window locks. Take every window
+                    # for the account-wide guard, in a fixed order, so their
+                    # in-flight inserts are visible before our next statement.
+                    lock_windows = (
+                        ("monthly", "primary", "primary_idle", "secondary") if require_no_prior_attempt else (window,)
+                    )
+                    for lock_window in lock_windows:
+                        await self._session.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                            {"key": f"limit_warmup:{account_id}:{lock_window}"},
+                        )
                 inserted_id = await self._session.scalar(insert_stmt)
                 await self._session.commit()
         except IntegrityError:

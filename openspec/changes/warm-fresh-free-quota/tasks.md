@@ -23,3 +23,5 @@
 - [x] 3.1 Run focused limit-warm-up and atomic claim tests.
 - [x] 3.2 Run Ruff, Ty, architecture/timing guards, strict OpenSpec validation,
   and diff hygiene checks.
+- [x] 3.3 Reproduce mixed-version PostgreSQL claims for every warm-up window
+  and preserve the existing advisory-lock protocol during rolling upgrades.
