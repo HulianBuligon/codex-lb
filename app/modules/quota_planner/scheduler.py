@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Protocol, TypeVar, cast
 
-from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
+from app.core.resilience.toggles import resolve_resilience_toggles
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import to_utc_naive
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.proxy.load_balancer import _build_states
+from app.modules.proxy.load_balancer import _build_states, effective_routing_tunables
 from app.modules.quota_planner.logic import build_demand_forecast, plan_shadow_actions, simulate_pool
 from app.modules.quota_planner.repository import QuotaPlannerRepository
 from app.modules.quota_planner.warmup import QuotaWarmupService
@@ -25,18 +24,6 @@ logger = logging.getLogger(__name__)
 # keeps ``interval_seconds`` as a constructor field so tests can exercise the
 # loop with a short interval.
 _TICK_SECONDS = 300
-
-
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 class QuotaPlannerScheduler:
@@ -86,6 +73,10 @@ class QuotaPlannerScheduler:
             )
 
     async def _run_once_as_leader(self) -> bool:
+        # One dashboard-settings snapshot per tick, taken before the session and
+        # outside any runtime lock: the account states below resolve soft drain
+        # and the routing tunables from it, not from the environment layer.
+        dashboard_settings = await get_settings_cache().get()
         async with get_background_session() as session:
             planner_repo = QuotaPlannerRepository(session)
             settings = await planner_repo.get_settings()
@@ -105,6 +96,8 @@ class QuotaPlannerScheduler:
                 latest_secondary=latest_secondary,
                 latest_monthly=latest_monthly,
                 runtime={},
+                routing_tunables=effective_routing_tunables(dashboard_settings),
+                soft_drain_enabled=resolve_resilience_toggles(dashboard_settings).soft_drain_enabled,
             )
             now = datetime.now(timezone.utc)
             demand_slots = await planner_repo.aggregate_demand_slot_units()
@@ -201,8 +194,5 @@ class QuotaPlannerScheduler:
 
 
 def build_quota_planner_scheduler() -> QuotaPlannerScheduler:
-    settings = get_settings()
-    return QuotaPlannerScheduler(
-        interval_seconds=_TICK_SECONDS,
-        enabled=getattr(settings, "quota_planner_scheduler_enabled", True),
-    )
+    # ``quota_planner_settings.mode == "off"`` (dashboard) is the only switch.
+    return QuotaPlannerScheduler(interval_seconds=_TICK_SECONDS, enabled=True)

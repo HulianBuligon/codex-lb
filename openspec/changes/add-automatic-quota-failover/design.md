@@ -67,6 +67,11 @@ Existing rows become enabled during upgrade, old application replicas ignore
 the additive column, and current replicas persist the value through the
 settings API. Downgrade drops only the new preference column.
 
+The no-op `20260909_080000_merge_quota_failover_upstream` revision joins the
+quota-setting branch with upstream's `20260909_070000_automation_run_claim_budget`.
+Neither existing migration is rewritten; databases already on either branch
+can upgrade to one head, and merge downgrade restores both parent stamps.
+
 ## Risks / Trade-offs
 
 - Up to three rejected attempts add at most fifteen seconds before a terminal
