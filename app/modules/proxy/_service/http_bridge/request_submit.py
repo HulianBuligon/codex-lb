@@ -3800,8 +3800,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
             using_fresh_replay = True
-        quota_replay = request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
-        if request_state.replay_count >= (_MAX_LIMIT_FAILOVER_RETRIES if quota_replay else 1):
+        if request_state.replay_count >= 1:
             return False
         if request_state.response_event_count > 0:
             return False
@@ -3863,6 +3862,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
+        quota_failure: bool = False,
     ) -> bool:
         # The admitted body's admission gate can claim the half-open probe;
         # any exit that never advances a send attempt past its baseline must
@@ -3876,6 +3876,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 request_state=request_state,
                 restart_reader=restart_reader,
+                quota_failure=quota_failure,
                 admission_claimed_leases=admission_claimed_leases,
                 retry_send_baselines=retry_send_baselines,
             )
@@ -3901,6 +3902,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
+        quota_failure: bool = False,
         admission_claimed_leases: list[float] | None = None,
         retry_send_baselines: list[tuple[_WebSocketRequestState, int]] | None = None,
     ) -> bool:
@@ -3926,7 +3928,7 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             if transport_only_unanchored_replay:
                 return False
-            quota_replay = request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
+            quota_replay = quota_failure and request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
             if _websocket_request_can_replay_before_visible_output(
                 request_state,
                 max_replay_count=_MAX_LIMIT_FAILOVER_RETRIES if quota_replay else 1,
@@ -4073,7 +4075,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 and request_state.response_event_count == 0
                 and request_state.clean_close_replay_count < clean_close_retry_max_count
             )
-            quota_replay = request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
+            quota_replay = quota_failure and request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
             if (
                 request_state.replay_count >= (_MAX_LIMIT_FAILOVER_RETRIES if quota_replay else 1)
                 and not additional_clean_close_retry

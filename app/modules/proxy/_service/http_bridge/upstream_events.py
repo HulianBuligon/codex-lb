@@ -3680,7 +3680,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                     or _http_bridge_accepted_anchored_replay_candidate(status_request_state)
                 )
             ):
-                if quota_error and status_request_state.previous_response_id is None:
+                if (
+                    quota_error
+                    and status_request_state.previous_response_id is None
+                    and not status_request_state.hard_continuity_anchor
+                ):
                     # A quota rejection is pre-visible and account-local. Move
                     # only this soft bridge request off the exhausted owner;
                     # hard continuity remains fail-closed above.
@@ -3703,7 +3707,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                         surface="http_bridge",
                         trigger="capacity_error",
                     )
-                retried = staged and await self._retry_http_bridge_precreated_request(session)
+                retried = staged and await self._retry_http_bridge_precreated_request(
+                    session,
+                    quota_failure=quota_error,
+                )
                 if retried:
                     return
                 async with session.pending_lock:

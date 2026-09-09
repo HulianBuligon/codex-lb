@@ -5720,7 +5720,7 @@ async def test_http_bridge_accepted_overload_code_stages_single_lifecycle_replay
     )
 
     _assert_staged_for_single_lifecycle_replay(request_state, session)
-    retry_precreated.assert_awaited_once_with(session)
+    retry_precreated.assert_awaited_once_with(session, quota_failure=False)
     handle_stream_error.assert_awaited_once()
     assert handle_stream_error.await_args is not None
     assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
@@ -5797,7 +5797,7 @@ async def test_http_bridge_accepted_anchored_overload_code_stages_single_lifecyc
     # body on its owner.
     assert request_state.previous_response_id == "resp-bridge-anchor"
     assert request_state.request_text == _ACCEPTED_BRIDGE_ANCHORED_REQUEST_TEXT
-    retry_precreated.assert_awaited_once_with(session)
+    retry_precreated.assert_awaited_once_with(session, quota_failure=False)
     handle_stream_error.assert_awaited_once()
     assert handle_stream_error.await_args is not None
     assert handle_stream_error.await_args.args[2] == code
@@ -25008,7 +25008,7 @@ async def test_process_http_bridge_upstream_text_retries_precreated_usage_limit(
     )
 
     handle_stream_error.assert_awaited_once()
-    retry_precreated.assert_awaited_once_with(session)
+    retry_precreated.assert_awaited_once_with(session, quota_failure=True)
     finalize.assert_not_awaited()
     assert request_state.event_queue is not None
     assert request_state.event_queue.empty()
@@ -25054,7 +25054,8 @@ async def test_process_http_bridge_upstream_text_masks_failed_replay_usage_limit
     )
     handle_stream_error = AsyncMock()
 
-    async def failed_replay(target_session: proxy_service._HTTPBridgeSession) -> bool:
+    async def failed_replay(target_session: proxy_service._HTTPBridgeSession, *, quota_failure: bool = False) -> bool:
+        assert quota_failure is True
         target_session.account = cast(Any, SimpleNamespace(id="acc-replacement", status=AccountStatus.ACTIVE))
         return False
 
@@ -27019,6 +27020,38 @@ async def test_retry_http_bridge_request_on_fresh_upstream_reconnects_without_re
         require_preferred_account=False,
     )
     send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_request_on_fresh_upstream_does_not_reuse_stale_quota_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-stale-quota-fresh-upstream")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stale-quota-fresh-upstream",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        replay_count=1,
+        precreated_replay_reason="usage_limit_reached",
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    recovered = await service._retry_http_bridge_request_on_fresh_upstream(
+        session=session,
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"hello"}',
+        send_request=False,
+    )
+
+    assert recovered is False
+    assert request_state.replay_count == 1
+    reconnect.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -30513,6 +30546,49 @@ async def test_retry_http_bridge_precreated_request_rejects_transport_only_ancho
     assert request_state.previous_response_id == "resp-anchor"
     assert request_state.replay_count == 0
     send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_does_not_reuse_stale_quota_budget_for_transport_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stale-quota-transport-close",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
+        transport="http",
+        replay_count=1,
+        precreated_replay_reason="usage_limit_reached",
+        precreated_replay_account_id="acc-quota-rejected",
+        account_response_create_lease=cast(Any, object()),
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey(
+            "prompt_cache",
+            "bridge-stale-quota-transport-close",
+            None,
+        ),
+        key_value="bridge-stale-quota-transport-close",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.last_upstream_close_code = 1011
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+
+    assert request_state.replay_count == 1
+    reconnect.assert_not_awaited()
+    cast(AsyncMock, session.upstream.send_text).assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -46031,12 +46107,76 @@ async def test_http_bridge_precreated_usage_limit_defers_keyed_health_until_sett
     )
 
     handle_stream_error.assert_not_awaited()
-    retry_precreated.assert_awaited_once_with(session)
+    retry_precreated.assert_awaited_once_with(session, quota_failure=True)
     assert len(request_state.deferred_keyed_stream_health) == 1
     penalty = request_state.deferred_keyed_stream_health[0]
     assert penalty.account is session.account
     assert penalty.code == "usage_limit_reached"
     assert getattr(request_state, "account_health_error_handled", False) is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_quota_limit_keeps_turn_state_request_on_its_continuity_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-turn-state-quota",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"hello"}',
+        transport="http",
+        hard_continuity_anchor=True,
+        affinity_policy=proxy_service._AffinityPolicy(
+            key="turn-state-quota-owner",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey(
+            "turn_state_header",
+            "turn-state-quota-owner",
+            None,
+        ),
+        key_value="turn-state-quota-owner",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    original_affinity_policy = request_state.affinity_policy
+
+    async def retry_precreated(retry_session: proxy_service._HTTPBridgeSession, **_kwargs: object) -> bool:
+        assert retry_session is session
+        assert request_state.excluded_account_ids == set()
+        assert request_state.affinity_policy == original_affinity_policy
+        assert request_state.precreated_replay_reason is None
+        return True
+
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 429,
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "The usage limit has been reached",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
 
 
 @pytest.mark.asyncio
