@@ -1059,6 +1059,7 @@ class _WebSocketRequestState:
     request_text: str | None = None
     replay_count: int = 0
     quota_failover_delay_pending: bool = False
+    quota_failover_detached_continuity: bool = False
     # Counts only the one extra replay permitted after the initial recovery
     # replay when the replacement upstream socket also closes cleanly before
     # producing any response event.

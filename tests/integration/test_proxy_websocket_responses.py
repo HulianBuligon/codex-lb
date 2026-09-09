@@ -13343,6 +13343,7 @@ class _TwoAccountWebSocketFailover:
             self.SECOND_ACCOUNT_ID: deque([recovered_upstream]),
         }
         self.connect_accounts: list[str] = []
+        self.connect_headers: list[dict[str, str]] = []
         self.excluded_at_connect: list[set[str]] = []
         self.required_at_connect: list[str | None] = []
         self.refused_connects: list[dict[str, Any]] = []
@@ -13400,7 +13401,8 @@ class _TwoAccountWebSocketFailover:
             api_key,
             **kwargs,
         ):
-            del headers, kwargs
+            del kwargs
+            failover.connect_headers.append(dict(headers))
             excluded_account_ids = set(request_state.excluded_account_ids)
             required_account_id = failover._required_account_id(request_state)
             hard_sticky_owner_id = failover._hard_sticky_owner_id(request_state)
@@ -14171,6 +14173,81 @@ def _assert_turn_state_follow_up_re_sent_to_its_owner(
     assert "previous_response_id" not in replayed_payload
     assert replayed_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
     assert other_account_upstream.sent_text == []
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("strategy", ["usage_weighted", "single_account"])
+def test_backend_responses_websocket_quota_recovers_verified_turn_state_history(
+    app_instance, monkeypatch, enabled, strategy
+):
+    failover, rejected, owner_recovery, replacement = _turn_state_owner_failover(
+        [
+            _ws_event(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "usage_limit_reached",
+                        "message": "You've hit your usage limit.",
+                    },
+                }
+            )
+        ]
+    )
+    failover.install(monkeypatch)
+
+    class SettingsCache:
+        async def get(self):
+            return _websocket_settings(quota_failover_enabled=enabled, routing_strategy=strategy)
+
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: SettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", AsyncMock())
+    events, disconnect = failover.run_turn_state_follow_up(app_instance)
+    if not enabled or strategy == "single_account":
+        assert replacement.sent_text == []
+        return
+    _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID] * 2 + [failover.SECOND_ACCOUNT_ID]
+    assert failover.required_at_connect[-1] is None
+    assert failover.excluded_at_connect[-1] == {failover.FIRST_ACCOUNT_ID}
+    assert owner_recovery.sent_text == []
+    assert "x-codex-turn-state" not in failover.connect_headers[-1]
+    replay = json.loads(replacement.sent_text[0])
+    assert "previous_response_id" not in replay
+    assert replay["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
+
+
+def test_backend_responses_websocket_verified_quota_continuation_stops_after_three_retries(app_instance, monkeypatch):
+    def rejection():
+        return [
+            _ws_event(
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "usage_limit_reached",
+                        "message": "Usage limit reached",
+                    },
+                }
+            )
+        ]
+
+    failover, _, _, _ = _turn_state_owner_failover(rejection())
+    for account_id in [failover.SECOND_ACCOUNT_ID, "acct_quota_c", "acct_quota_d", "acct_unused_e"]:
+        failover.upstreams_by_account[account_id] = deque(
+            [_SequencedUpstreamWebSocket([], deferred_message_batches=[rejection()])]
+        )
+    failover.install(monkeypatch)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", AsyncMock())
+    events, disconnect = failover.run_turn_state_follow_up(app_instance)
+    assert failover.connect_accounts == [
+        failover.FIRST_ACCOUNT_ID,
+        failover.FIRST_ACCOUNT_ID,
+        failover.SECOND_ACCOUNT_ID,
+        "acct_quota_c",
+        "acct_quota_d",
+    ]
+    assert disconnect is None
+    assert events[-1]["error"]["code"] == "usage_limit_reached"
 
 
 @pytest.mark.parametrize(

@@ -40,3 +40,13 @@
 
 - [x] 5.1 Push the feature branch to the contributor fork and open a PR against
   `Soju06/codex-lb:main` using the repository template.
+
+## 6. Verified continuation quota recovery
+
+- [x] 6.1 Permit pre-created quota recovery from a continuation only when an
+  account-neutral full-history replay has been verified; preserve file and
+  unreconstructible ownership, API-key scope, and non-quota retry behavior.
+- [x] 6.2 Release obsolete request-local continuity on recovery without globally
+  deleting sticky mappings or moving account-scoped turn-state headers.
+- [x] 6.3 Test enabled/disabled continuation recovery, safety exclusions, and
+  bounded retries; validate without another review.

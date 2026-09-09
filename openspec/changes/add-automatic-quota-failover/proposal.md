@@ -15,6 +15,10 @@ account.
   ownership safety boundaries.
 - Retire an exhausted account's soft request affinity without altering hard
   previous-response, turn-state, file, or Codex-session ownership.
+- Permit verified account-neutral continuation bodies to leave an exhausted
+  owner before acceptance, without forwarding obsolete account-local anchors.
+  Stored files, incomplete histories, and durable operation ownership stay
+  fail-closed; this is not an unconditional purge of sticky sessions.
 - Cover streaming HTTP/WebSocket egress and the HTTP responses bridge without
   depending on routing strategy, reset preference, or transport policy.
 - Add a persisted, default-on `quota_failover_enabled` operational kill switch

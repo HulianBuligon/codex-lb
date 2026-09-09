@@ -25258,8 +25258,10 @@ async def test_process_http_bridge_upstream_text_masks_previous_response_usage_l
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("quota_failover_enabled", [True, False])
 async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
     monkeypatch: pytest.MonkeyPatch,
+    quota_failover_enabled: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     fresh_text = (
@@ -25289,7 +25291,9 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
         affinity_policy=proxy_service._AffinityPolicy(
             key="http_turn_verified_owner_limit",
             kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            codex_session_source="turn_state",
         ),
+        hard_continuity_anchor=True,
     )
     account = cast(Any, SimpleNamespace(id="acc-limited", status=AccountStatus.ACTIVE))
     session = proxy_service._HTTPBridgeSession(
@@ -25316,7 +25320,9 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
     handle_stream_error = AsyncMock()
     release_create_lease = AsyncMock()
 
-    async def retry_precreated(retry_session):
+    async def retry_precreated(retry_session, *, quota_failure=False):
+        assert quota_failover_enabled
+        assert quota_failure
         assert retry_session is session
         assert session.upstream_turn_state is None
         assert session.downstream_turn_state is None
@@ -25325,6 +25331,8 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
         assert request_state.request_text == fresh_text
         assert request_state.excluded_account_ids == {account.id}
         assert request_state.affinity_policy.reallocate_sticky is True
+        assert request_state.affinity_policy.key is None
+        assert not request_state.hard_continuity_anchor
         assert list(session.pending_requests) == [request_state]
         return True
 
@@ -25335,6 +25343,14 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
         release_create_lease,
     )
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(quota_failover_enabled=quota_failover_enabled))
+        ),
+    )
 
     await service._process_http_bridge_upstream_text(
         session,
@@ -25352,9 +25368,109 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
     )
 
     handle_stream_error.assert_awaited_once()
+    if not quota_failover_enabled:
+        assert request_state.previous_response_id == "resp_verified_owner"
+        assert request_state.excluded_account_ids == set()
+        release_create_lease.assert_not_awaited()
+        return
     release_create_lease.assert_awaited_once_with(request_state)
     assert request_state.event_queue is not None
     assert request_state.event_queue.empty()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_available", [True, False])
+async def test_http_bridge_verified_quota_continuation_selects_and_sends_on_replacement(
+    monkeypatch, replacement_available
+):
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    fresh = '{"type":"response.create","model":"gpt-5.4","input":"complete verified history"}'
+    request = proxy_service._WebSocketRequestState(
+        request_id="quota-bridge-connect",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-old",
+        preferred_account_id="acc-bridge",
+        hard_continuity_anchor=True,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","previous_response_id":"resp-old","input":"delta"}',
+        fresh_upstream_request_text=fresh,
+        fresh_upstream_request_is_retry_safe=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+        affinity_policy=proxy_service._AffinityPolicy(
+            key="old-turn", kind=proxy_service.StickySessionKind.CODEX_SESSION, codex_session_source="turn_state"
+        ),
+    )
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "old-turn", None),
+        pending_requests=deque([request]),
+        queued_request_count=1,
+    )
+    session.affinity = request.affinity_policy
+    session.headers = {"x-codex-turn-state": "old-account-token"}
+    replacement = SimpleNamespace(id="replacement", status=AccountStatus.ACTIVE, plan_type="plus")
+    sent = []
+
+    async def select(_deadline, **kwargs):
+        assert kwargs["affinity_policy"].selection_key is None
+        assert kwargs["exclude_account_ids"] == {"acc-bridge"}
+        if not replacement_available:
+            return proxy_service.AccountSelection(
+                account=None, error_message="No eligible accounts", error_code="no_accounts"
+            )
+        return proxy_service.AccountSelection(account=cast(Any, replacement), error_message=None)
+
+    async def send(text):
+        sent.append(_without_installation_metadata(text))
+
+    async def open_upstream(account, headers, **kwargs):
+        assert account is replacement
+        assert "x-codex-turn-state" not in headers
+        return cast(
+            UpstreamWebSocket, SimpleNamespace(send_text=send, close=AsyncMock(), response_header=lambda _: None)
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_: account))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", open_upstream)
+    monkeypatch.setattr(http_bridge_mixin_module, "_LIMIT_FAILOVER_DELAY_SECONDS", 0)
+    dashboard = SimpleNamespace(
+        prefer_earlier_reset_accounts=False, routing_strategy="usage_weighted", quota_failover_enabled=True
+    )
+    monkeypatch.setattr(
+        proxy_service, "get_settings_cache", lambda: SimpleNamespace(get=AsyncMock(return_value=dashboard))
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_retry_circuit", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps({"type": "error", "error": {"code": "usage_limit_reached", "message": "Usage limit reached"}}),
+    )
+    if not replacement_available:
+        assert sent == []
+        assert request.event_queue is not None
+        terminal_block = await request.event_queue.get()
+        assert terminal_block is not None
+        terminal = proxy_service.parse_sse_data_json(terminal_block)
+        assert isinstance(terminal, dict)
+        response = terminal["response"]
+        assert isinstance(response, dict)
+        error = response["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == "usage_limit_reached"
+        return
+    assert session.account is replacement
+    assert sent == [json.loads(fresh)]
+    assert request.replay_count == 1
+    assert request.event_queue is not None
+    assert request.event_queue.empty()
 
 
 @pytest.mark.asyncio

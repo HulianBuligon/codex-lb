@@ -416,6 +416,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_matching_websocket_request_states,
     _pop_replayable_precreated_websocket_request_state,
     _pop_terminal_websocket_request_state,
+    _prepare_websocket_quota_continuation_replay,
     _prepare_websocket_request_state_for_account_switch,
     _prepare_websocket_request_state_for_auth_replay,
     _record_or_defer_websocket_accepted_replay_health,
@@ -483,7 +484,7 @@ from app.modules.proxy.capability_routing import (
     reject_capability_signal_outside_response_create,
     strip_capability_metadata,
 )
-from app.modules.proxy.continuity import resolve_required_account_id
+from app.modules.proxy.continuity import resolve_required_account_id, without_http_bridge_session_affinity_headers
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -1631,6 +1632,16 @@ class _WebSocketMixin:
                 if replay_request_state is not None:
                     request_state = replay_request_state
                     replay_request_state = None
+                    if request_state.quota_failover_detached_continuity:
+                        # The full body replaces the old account's continuation,
+                        # not its durable identity. Never mutate its cached
+                        # history or forward its token to the replacement.
+                        headers = without_http_bridge_session_affinity_headers(headers)
+                        filtered_headers = without_http_bridge_session_affinity_headers(filtered_headers)
+                        client_turn_state_header = None
+                        synthesized_turn_state = None
+                        upstream_turn_state = None
+                        continuity_state = _WebSocketContinuityState()
                     # This state now belongs to a fresh transport attempt. The
                     # next reader may classify a close as post-send replayable
                     # only after this attempt reaches its own send boundary.
@@ -5892,6 +5903,13 @@ class _WebSocketMixin:
             and request_state.response_id is not None
             and not request_state.awaiting_response_created
         )
+        if retry_error_code in _LIMIT_FAILOVER_ERROR_CODES and not accepted_lifecycle_replay:
+            quota_settings = await _facade().get_settings_cache().get()
+            quota_enabled = getattr(quota_settings, "quota_failover_enabled", True)
+            if not quota_enabled:
+                retry_error_code = None
+            elif getattr(quota_settings, "routing_strategy", None) != "single_account":
+                _prepare_websocket_quota_continuation_replay(request_state)
         retry_safe_owner_replay = bool(
             not accepted_lifecycle_replay
             and retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES

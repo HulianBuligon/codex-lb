@@ -11,7 +11,9 @@
 **Non-Goals:**
 
 - No replay after response acceptance or downstream-visible output.
-- No migration of hard account-owned continuations or files.
+- No migration of files, incomplete/account-scoped history, or durable operations
+  that require their original owner. An existing verified account-neutral full
+  history may replace its continuation anchor before acceptance.
 - No changes to account ranking, quota estimation, reset ordering, or routing
   strategy semantics.
 - No retry of arbitrary upstream or local failures.
@@ -47,6 +49,16 @@
 - **Share retry constants across transports.** Streaming and bridge paths use
   the same error allowlist, three-retry ceiling, and five-second delay so
   transport configuration cannot change the contract.
+- **Detach verified continuation bodies, not arbitrary ownership.** Reuse the
+  retained full-history proof and account-neutral validator. On quota only,
+  release the request's obsolete response/turn-state pin and select without
+  that hard affinity. Clear the old transport/session headers before dispatch.
+  Native WebSocket recovery uses a separate in-memory continuity state so a
+  new response does not overwrite the old token's cached history. Bridge
+  recovery uses its existing lease-fenced reconnect and continuity cleanup;
+  requests with a durable operation id remain owner-bound. The kill switch,
+  single-account strategy, output visibility, pending siblings, file pins,
+  and unchanged request deadline remain authoritative.
 
 ## Migration
 

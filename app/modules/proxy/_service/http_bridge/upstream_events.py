@@ -115,6 +115,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _maybe_rewrite_websocket_previous_response_not_found_event,
     _pop_matching_websocket_request_states,
     _pop_terminal_websocket_request_state,
+    _prepare_websocket_quota_continuation_replay,
     _prepare_websocket_request_state_for_account_switch,
     _previous_response_id_from_not_found_message,
     _release_websocket_response_create_gate,
@@ -3541,7 +3542,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                 and status_request_state.previous_response_id is not None
                 and status_request_state.preferred_account_id is not None
             ):
-                safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
+                quota_failure = owner_pinned_quota_error in _LIMIT_FAILOVER_ERROR_CODES
+                if quota_failure:
+                    quota_settings = await _service_get_settings_cache().get()
+                    quota_enabled = getattr(quota_settings, "quota_failover_enabled", True)
+                    can_detach = (
+                        quota_enabled
+                        and getattr(quota_settings, "routing_strategy", None) != "single_account"
+                        and retry_error_code is not None
+                        and not has_other_pending_requests
+                        and _prepare_websocket_quota_continuation_replay(status_request_state)
+                    )
+                    safe_request_text = status_request_state.request_text if can_detach else None
+                else:
+                    safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
                 if safe_request_text is not None:
                     previous_upstream_turn_state = session.upstream_turn_state
                     previous_downstream_turn_state = session.downstream_turn_state
@@ -3560,7 +3574,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                             session.queued_request_count += 1
                         status_request_state.awaiting_response_created = True
                         status_request_state.response_id = None
-                    retried = await self._retry_http_bridge_precreated_request(session)
+                    if quota_failure:
+                        status_request_state.precreated_replay_reason = owner_pinned_quota_error
+                        status_request_state.precreated_replay_account_id = session.account.id
+                    retried = (
+                        await self._retry_http_bridge_precreated_request(session, quota_failure=True)
+                        if quota_failure
+                        else await self._retry_http_bridge_precreated_request(session)
+                    )
                     if retried:
                         return
                     session.upstream_turn_state = previous_upstream_turn_state
@@ -3569,14 +3590,22 @@ class _HTTPBridgeUpstreamEventsMixin:
                         if status_request_state in session.pending_requests:
                             session.pending_requests.remove(status_request_state)
                             session.queued_request_count = max(0, session.queued_request_count - 1)
-                    status_request_state.error_http_status_override = 502
-                    (
-                        _downstream_text,
-                        event_block,
-                        event,
-                        payload,
-                        event_type,
-                    ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+                    if quota_failure and session.account.id == status_request_state.precreated_replay_account_id:
+                        # No replacement connection was established. Preserve
+                        # the upstream quota terminal (including reset metadata).
+                        _clear_websocket_request_error_overrides(status_request_state)
+                        status_request_state.error_http_status_override = (
+                            _http_error_status_from_payload(payload) or 429
+                        )
+                    else:
+                        status_request_state.error_http_status_override = 502
+                        (
+                            _downstream_text,
+                            event_block,
+                            event,
+                            payload,
+                            event_type,
+                        ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
                 else:
                     status_request_state.error_http_status_override = 502
                     session.upstream_control.reconnect_requested = True

@@ -1057,6 +1057,47 @@ def test_websocket_verified_fresh_replay_clears_dispatch_owner_atomically():
     assert request_state.replay_required_account_id is None
 
 
+@pytest.mark.parametrize("blocker", ["no_proof", "file_pin", "file_body", "operation", "conversation", "no_anchor"])
+def test_quota_continuation_replay_preserves_non_reconstructible_owner(blocker):
+    request = proxy_service._WebSocketRequestState(
+        request_id="req-quota-proof",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","previous_response_id":"resp-owner","input":"delta"}',
+        previous_response_id="resp-owner",
+        preferred_account_id="owner",
+        fresh_upstream_request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"full history"}',
+        fresh_upstream_request_is_retry_safe=True,
+    )
+    if blocker == "no_proof":
+        request.fresh_upstream_request_is_retry_safe = False
+    elif blocker == "file_pin":
+        request.file_required_preferred_account = True
+    elif blocker == "file_body":
+        request.fresh_upstream_request_text = json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file-owner"}]}],
+            }
+        )
+    elif blocker == "operation":
+        request.operation_id = "durable-account-operation"
+    elif blocker == "conversation":
+        request.payload_conversation_bound = True
+    elif blocker == "no_anchor":
+        request.previous_response_id = None
+    old_text = request.request_text
+    old_anchor = request.previous_response_id
+    assert not proxy_service._prepare_websocket_quota_continuation_replay(request)
+    assert request.preferred_account_id == "owner"
+    assert request.previous_response_id == old_anchor
+    assert request.request_text == old_text
+
+
 def test_websocket_bound_auth_replay_allows_one_same_owner_refresh():
     request_text = (
         '{"type":"response.create","model":"gpt-5.6-sol","input":['
@@ -40998,7 +41039,11 @@ async def test_stream_previous_response_owner_usage_limit_fails_closed(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quota(monkeypatch):
+@pytest.mark.parametrize("turn_state", [False, True])
+@pytest.mark.parametrize("quota_transport", ["sse", "http"])
+async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quota(
+    monkeypatch, turn_state, quota_transport
+):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -41019,6 +41064,11 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quo
     )
     selection_calls: list[dict[str, object]] = []
     streamed_payloads: list[ResponsesRequest] = []
+    headers = {"session_id": session_id}
+    if turn_state:
+        headers["x-codex-turn-state"] = "verified-owner-turn"
+        request_logs.response_owner_by_id[(previous_response_id, None, "verified-owner-turn")] = owner_account.id
+        monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=owner_account.id))
 
     async def fake_select_account(**kwargs):
         selection_calls.append(dict(kwargs))
@@ -41030,9 +41080,11 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quo
         return AccountSelection(account=replacement_account, error_message=None)
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
-        del headers, access_token, base_url, raise_for_status, kwargs
+        del access_token, base_url, raise_for_status, kwargs
         streamed_payloads.append(payload)
         if account_id == owner_account.chatgpt_account_id:
+            if quota_transport == "http":
+                raise proxy_service.ProxyResponseError(429, openai_error("usage_limit_reached", "Usage limit reached"))
             yield (
                 'data: {"type":"response.failed","response":{"id":"resp_owner_quota",'
                 '"status":"failed","error":{"code":"usage_limit_reached",'
@@ -41041,6 +41093,7 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quo
             )
             return
         assert account_id == replacement_account.chatgpt_account_id
+        assert "x-codex-turn-state" not in headers
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_replay_ok",'
             '"status":"completed","usage":{"input_tokens":1,"output_tokens":1,'
@@ -41066,9 +41119,10 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quo
         }
     )
 
-    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": session_id})]
+    chunks = [chunk async for chunk in service.stream_responses(payload, headers)]
 
-    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert terminal["type"] == "response.completed", terminal["response"].get("error")
     assert len(selection_calls) >= 2
     assert [streamed.previous_response_id for streamed in streamed_payloads] == [previous_response_id, None]
     assert streamed_payloads[1].input == full_input

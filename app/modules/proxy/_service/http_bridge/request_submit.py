@@ -3969,7 +3969,10 @@ class _HTTPBridgeRequestSubmitMixin:
                         and not candidate.proxy_injected_previous_response_id
                         and not candidate.file_required_preferred_account
                         and candidate.response_event_count == 0
-                        and candidate.replay_count == 0
+                        and (
+                            candidate.replay_count == 0
+                            or (quota_failure and candidate.quota_failover_detached_continuity)
+                        )
                     )
                     proof_gated_continuity_replay_candidate = (
                         candidate.previous_response_id is not None

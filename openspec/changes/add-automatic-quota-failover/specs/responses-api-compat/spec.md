@@ -17,8 +17,15 @@ The behavior MUST apply to streaming HTTP/WebSocket egress and HTTP responses
 bridge pre-created requests. It MUST NOT depend on routing strategy,
 earlier-reset preference, or transport policy. It MUST NOT replay after an
 upstream response event or downstream-visible output, and MUST NOT migrate a
-request with hard previous-response, turn-state, uploaded-file, single-account,
-or other required account ownership. Disabling automatic quota failover MUST
+request with uploaded-file, single-account, or other non-reconstructible
+account ownership, including a registered durable operation that still requires
+its owner. Previous-response and turn-state continuations MAY move
+only when the proxy has verified an account-neutral full-history replay:
+the replacement MUST omit the old response anchor and account-scoped turn-state
+header and MUST NOT reassign stored response or file ownership to the replacement.
+HTTP bridge session replacement MUST preserve its existing lease-fenced
+continuity cleanup. Old native WebSocket token/history state MUST remain intact.
+Disabling automatic quota failover MUST
 surface the first qualifying failure without selecting another account.
 
 #### Scenario: Rejected account is excluded and another account completes
@@ -64,10 +71,23 @@ surface the first qualifying failure without selecting another account.
 
 - **GIVEN** a request requires a previous-response, turn-state, uploaded-file,
   single-account, or other hard account owner
+- **AND** an account-neutral full-history replay cannot be verified
 - **WHEN** that owner returns a qualifying quota failure
 - **THEN** the proxy does not send the request to another account
 - **AND** it surfaces the owner-unavailable or upstream quota terminal defined
   by the existing continuity contract
+
+#### Scenario: Verified continuation recovers after quota rejection
+
+- **GIVEN** a continuation has a verified, self-contained full-history replay
+- **AND** no registered durable operation or other non-reconstructible
+  account ownership requires its original owner
+- **AND** its owner rejects it with an explicit quota code before acceptance
+- **WHEN** automatic quota failover is enabled
+- **THEN** the proxy retries the full history on another eligible account
+- **AND** the old response id and turn-state token do not cross accounts
+- **AND** the same three-retry ceiling, delay, and request deadline apply
+- **AND** unrelated sticky mappings and old response ownership remain intact
 
 #### Scenario: Visible response is not replayed
 

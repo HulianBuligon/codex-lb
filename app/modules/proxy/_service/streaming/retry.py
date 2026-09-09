@@ -74,6 +74,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
 )
 from app.modules.proxy.affinity import (
+    _AffinityPolicy,
     _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
@@ -83,7 +84,7 @@ from app.modules.proxy.affinity import (
     _websocket_continuity_key_from_headers,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.continuity import resolve_required_account_id
+from app.modules.proxy.continuity import resolve_required_account_id, without_http_bridge_session_affinity_headers
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _is_account_model_unsupported_error,
@@ -819,12 +820,21 @@ class _StreamingRetryMixin:
                 payload.to_replay_safety_payload()
             )
 
-        def _move_verified_fresh_replay_from_owner(*, account_id: str, outcome: str) -> bool:
+        def _move_verified_fresh_replay_from_owner(
+            *, account_id: str, outcome: str, quota_failure: bool = False
+        ) -> bool:
             # Only a proxy-injected owner anchor with locally verified full
             # input may move; the failed owner stays excluded so sticky
             # selection cannot immediately loop back to it.
             nonlocal affinity, payload, payload_replay_required_account_id
             nonlocal preferred_account_id, require_preferred_account, verified_fresh_replay_payload
+            nonlocal headers, turn_state_owner_account_id
+            if quota_failure and (
+                not quota_failover_enabled
+                or routing_strategy == "single_account"
+                or file_preferred_account_id is not None
+            ):
+                return False
             if not (
                 require_preferred_account
                 and preferred_account_id == account_id
@@ -842,6 +852,10 @@ class _StreamingRetryMixin:
             preferred_account_id = None
             require_preferred_account = False
             affinity = replace(affinity, reallocate_sticky=True)
+            if quota_failure:
+                headers = without_http_bridge_session_affinity_headers(headers)
+                turn_state_owner_account_id = None
+                affinity = _AffinityPolicy(reallocate_sticky=True)
             logger.info(
                 "cross_transport_verified_fresh_replay request_id=%s outcome=%s account_id=%s",
                 request_id,
@@ -2598,6 +2612,7 @@ class _StreamingRetryMixin:
                                     _move_verified_fresh_replay_from_owner(
                                         account_id=account.id,
                                         outcome="owner_previsible_failure",
+                                        quota_failure=limit_failure,
                                     )
                                     break
                                 await proxy._handle_stream_error(
@@ -2772,6 +2787,7 @@ class _StreamingRetryMixin:
                     _move_verified_fresh_replay_from_owner(
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
+                        quota_failure=_is_limit_failover_error(exc.code),
                     )
                     continue
                 except _TerminalStreamError as exc:
@@ -3257,6 +3273,7 @@ class _StreamingRetryMixin:
                                 _move_verified_fresh_replay_from_owner(
                                     account_id=account.id,
                                     outcome="owner_post_refresh_quota_failure",
+                                    quota_failure=True,
                                 )
                                 can_retry_limit = bool(
                                     quota_failover_enabled
