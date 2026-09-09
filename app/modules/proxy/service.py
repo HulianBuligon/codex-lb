@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 from collections.abc import Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast
@@ -58,6 +57,7 @@ from app.core.clients.proxy_websocket import (
 from app.core.clients.proxy_websocket import (
     connect_responses_websocket as connect_responses_websocket,
 )
+from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -71,7 +71,6 @@ from app.core.errors import (
     ResponseFailedEvent,
     coerce_error_param,
     is_previous_response_not_found_error,
-    is_previous_response_not_found_message,
     openai_error,
     previous_response_id_from_not_found_message,
     previous_response_stream_incomplete_error,
@@ -130,6 +129,7 @@ from app.modules.proxy._service.api_key_usage import (
 from app.modules.proxy._service.api_key_usage import (
     _estimated_lease_tokens_from_request_usage_budget as _estimated_lease_tokens_from_request_usage_budget,
 )
+from app.modules.proxy._service.clock_budget import _ClockBudgetMixin, _remaining_budget_seconds  # noqa: F401
 from app.modules.proxy._service.codex_control import _CodexControlMixin
 from app.modules.proxy._service.compact import _CompactMixin
 from app.modules.proxy._service.compact import (
@@ -513,18 +513,13 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _call_stream_with_supported_optional_kwargs as _call_stream_with_supported_optional_kwargs,
 )
-from app.modules.proxy._service.streaming.helpers import (
-    _classify_upstream_close as _classify_upstream_close,
-)
+from app.modules.proxy._service.streaming.helpers import _classify_upstream_close as _classify_upstream_close
 from app.modules.proxy._service.streaming.helpers import (
     _is_account_neutral_transport_drop as _is_account_neutral_transport_drop,
 )
 from app.modules.proxy._service.streaming.helpers import _is_background_json_ack as _is_background_json_ack
 from app.modules.proxy._service.streaming.helpers import (
     _push_stream_attempt_timeout_overrides as _push_stream_attempt_timeout_overrides,
-)
-from app.modules.proxy._service.streaming.helpers import (
-    _resolve_upstream_stream_transport as _resolve_upstream_stream_transport,
 )
 from app.modules.proxy._service.streaming.helpers import (
     _rewrite_previous_response_stream_error as _rewrite_previous_response_stream_error,
@@ -915,16 +910,20 @@ class ProxyService(
     _WebSocketMixin,
     _HTTPBridgeRetryCircuitMixin,
     _HTTPBridgeMixin,
+    _ClockBudgetMixin,
 ):
     def __init__(
         self,
         repo_factory: ProxyRepoFactory,
         *,
+        clock: Clock = REAL_CLOCK,
+        scheduler: Scheduler = REAL_SCHEDULER,
         live_websocket_connector: LiveWebSocketConnector = connect_live_websocket,
     ) -> None:
         self._repo_factory = repo_factory
+        self._clock, self._scheduler = clock, scheduler
         self._encryptor = TokenEncryptor()
-        self._load_balancer = LoadBalancer(repo_factory, encryptor=self._encryptor)
+        self._load_balancer = LoadBalancer(repo_factory, encryptor=self._encryptor, clock=clock)
         self._capability_router = CapabilityRouter(repo_factory)
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
@@ -955,11 +954,8 @@ class ProxyService(
                 websocket_connect_limit=settings.proxy_upstream_websocket_connect_limit,
                 response_create_limit=settings.proxy_response_create_limit,
                 compact_response_create_limit=settings.proxy_compact_response_create_limit,
-                admission_wait_timeout_seconds=getattr(
-                    settings,
-                    "proxy_admission_wait_timeout_seconds",
-                    10.0,
-                ),
+                admission_wait_timeout_seconds=getattr(settings, "proxy_admission_wait_timeout_seconds", 10.0),
+                scheduler=self._scheduler,
             )
         return self._work_admission
 
@@ -976,7 +972,7 @@ class ProxyService(
         filtered = filter_inbound_headers(headers)
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
-        start = time.monotonic()
+        start = self._clock.monotonic()
         base_settings = get_settings()
         deadline = start + base_settings.proxy_request_budget_seconds
         settings = await get_settings_cache().get()
@@ -1030,7 +1026,7 @@ class ProxyService(
                 nonlocal route_fallback_used, route_mode, route_pool_id, route_endpoint_id
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
                 upstream_account_id = _header_account_id(target.chatgpt_account_id)
-                remaining_budget = _remaining_budget_seconds(deadline)
+                remaining_budget = self._remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     logger.warning(
                         "Thread goal request budget exhausted before upstream call request_id=%s operation=%s "
@@ -1129,7 +1125,7 @@ class ProxyService(
                         return response
                 if exc.status_code == 401:
                     try:
-                        remaining_budget = _remaining_budget_seconds(deadline)
+                        remaining_budget = self._remaining_budget_seconds(deadline)
                         if remaining_budget <= 0:
                             logger.warning(
                                 "Thread goal request budget exhausted before forced refresh retry request_id=%s "
@@ -1179,7 +1175,7 @@ class ProxyService(
                                     account_id_value = account.id
                                     account = await self._ensure_fresh_with_budget_or_auth_error(
                                         account,
-                                        timeout_seconds=_remaining_budget_seconds(deadline),
+                                        timeout_seconds=self._remaining_budget_seconds(deadline),
                                     )
                                     try:
                                         response = await _call_goal(account)
@@ -1238,7 +1234,7 @@ class ProxyService(
                 api_key=api_key,
                 request_id=request_id,
                 model=None,
-                latency_ms=int((time.monotonic() - start) * 1000),
+                latency_ms=int((self._clock.monotonic() - start) * 1000),
                 status=log_status,
                 error_code=log_error_code,
                 error_message=log_error_message,
@@ -1269,11 +1265,14 @@ class ProxyService(
         account_id: str | None = None,
         surface: str = "websocket",
     ) -> None:
+        scheduler = self._scheduler
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
         if bridge_session is not None:
-            timeout_seconds = _http_bridge_admission_timeout_seconds(request_state, timeout_seconds, get_settings())
+            timeout_seconds = _http_bridge_admission_timeout_seconds(
+                request_state, timeout_seconds, get_settings(), now=self._clock.monotonic()
+            )
         request_state.response_create_gate = response_create_gate
-        request_state.response_create_gate_wait_started_at = time.monotonic()
+        request_state.response_create_gate_wait_started_at = self._clock.monotonic()
         if account_id is not None:
             settings = await get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
@@ -1284,7 +1283,7 @@ class ProxyService(
             )
             request_state.account_response_create_release = self._load_balancer.release_account_lease
         try:
-            await asyncio.wait_for(response_create_gate.acquire(), timeout=timeout_seconds)
+            await scheduler.wait_for(response_create_gate.acquire(), timeout=timeout_seconds)
         except TimeoutError as exc:
             await self._release_request_state_account_response_create_lease(request_state)
             request_state.response_create_gate = None
@@ -1298,7 +1297,7 @@ class ProxyService(
             stale_pending_requests_to_fail: list[_WebSocketRequestState] = []
             retry_circuit_attempt_selection = None
             if bridge_session is not None:
-                now = time.monotonic()
+                now = self._clock.monotonic()
                 stale_gate_snapshot = await self._snapshot_http_bridge_stale_gate_state(bridge_session, now=now)
                 pending_states = stale_gate_snapshot.pending_states
                 pending_count = len(pending_states)
@@ -1382,7 +1381,7 @@ class ProxyService(
         request_state.awaiting_response_created = True
         if request_state.response_create_gate_wait_started_at is not None:
             request_state.latency_response_create_gate_wait_ms = int(
-                max(0.0, time.monotonic() - request_state.response_create_gate_wait_started_at) * 1000
+                max(0.0, self._clock.monotonic() - request_state.response_create_gate_wait_started_at) * 1000
             )
         try:
             request_state.response_create_admission = await self._get_work_admission().acquire_response_create(
@@ -1390,7 +1389,7 @@ class ProxyService(
             )
         except BaseException:
             await self._release_request_state_account_response_create_lease(request_state)
-            await _release_websocket_response_create_gate(request_state, response_create_gate)
+            await _release_websocket_response_create_gate(request_state, response_create_gate, scheduler=scheduler)
             raise
 
     async def _release_request_state_account_response_create_lease(
@@ -1446,7 +1445,7 @@ class ProxyService(
                 refresh = auth_manager.ensure_fresh(account, force=force)
                 if timeout_seconds is None:
                     return await refresh
-                return await asyncio.wait_for(refresh, timeout=max(0.001, timeout_seconds))
+                return await self._scheduler.wait_for(refresh, timeout=max(0.001, timeout_seconds))
         finally:
             pop_token_refresh_timeout_override(token)
 
@@ -1458,13 +1457,13 @@ class ProxyService(
         timeout_seconds: float | None = None,
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account:
-        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        deadline = None if timeout_seconds is None else self._clock.monotonic() + timeout_seconds
         return await _recover_fresh_account(
             self,
             account,
             force=force,
             deadline=deadline,
-            remaining_budget_seconds=_remaining_budget_seconds,
+            remaining_budget_seconds=self._remaining_budget_seconds,
             request_id=get_request_id(),
             privacy_policy=privacy_policy,
         )
@@ -1488,7 +1487,7 @@ class ProxyService(
         force_current = force
         while True:
             attempt += 1
-            remaining_budget = _remaining_budget_seconds(deadline)
+            remaining_budget = self._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
                 logger.warning(
                     "%s request budget exhausted before freshness check request_id=%s account_id=%s",
@@ -1573,7 +1572,7 @@ class ProxyService(
                 self,
                 account,
                 force=force,
-                timeout_seconds=_remaining_budget_seconds(deadline),
+                timeout_seconds=self._remaining_budget_seconds(deadline),
                 privacy_policy=privacy_policy,
             )
 
@@ -1602,7 +1601,7 @@ class ProxyService(
             failover_failed_account = _proxy_response_failed_account(failover_exc, next_account)
             setattr(failover_exc, _FAILED_ACCOUNT_ATTR, failover_failed_account)
             if failover_exc.status_code == 401:
-                remaining_budget = _remaining_budget_seconds(deadline)
+                remaining_budget = self._remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     _raise_proxy_budget_exhausted()
                 try:
@@ -1716,7 +1715,7 @@ class ProxyService(
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         redact_sensitive_details: bool = False,
     ) -> AccountSelection:
-        remaining_budget = _remaining_budget_seconds(deadline)
+        remaining_budget = self._remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
             logger.warning(
                 "%s request budget exhausted before account selection request_id=%s", kind.title(), request_id
@@ -1760,7 +1759,7 @@ class ProxyService(
             remaining_budget,
         )
         try:
-            with anyio.fail_after(remaining_budget):
+            with self._scheduler.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
                 concurrency_caps = effective_account_concurrency_caps(settings)
                 stream_reserve_slots = (
@@ -2099,10 +2098,6 @@ class ProxyService(
         )
 
 
-def _is_previous_response_not_found_message(message: str | None) -> bool:
-    return is_previous_response_not_found_message(message)
-
-
 def _previous_response_id_from_not_found_message(message: str | None) -> str | None:
     return previous_response_id_from_not_found_message(message)
 
@@ -2346,10 +2341,6 @@ def _sticky_reallocation_secondary_budget_threshold_pct(settings: DashboardSetti
     return float(value if value is not None else 100.0)
 
 
-def _remaining_budget_seconds(deadline: float) -> float:
-    return max(0.0, deadline - time.monotonic())
-
-
 def _proxy_request_timeout_event(request_id: str) -> ResponseFailedEvent:
     event = response_failed_event("upstream_request_timeout", "Proxy request budget exhausted", response_id=request_id)
     return synthetic_transport_failure_event(event)
@@ -2525,21 +2516,6 @@ def _previous_response_owner_lookup_failed_error_envelope() -> OpenAIErrorEnvelo
         "Previous response owner lookup failed; retry later.",
         error_type="server_error",
     )
-
-
-def _mark_request_state_previous_response_not_found(
-    request_state: _WebSocketRequestState,
-    detail: str,
-) -> None:
-    previous_response_id = request_state.previous_response_id
-    if previous_response_id is None:
-        return
-    payload = _http_bridge_previous_response_error_envelope(previous_response_id, detail)
-    error = payload["error"]
-    request_state.error_code_override = error.get("code")
-    request_state.error_message_override = error.get("message")
-    request_state.error_type_override = error.get("type")
-    request_state.error_param_override = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
 
 
 def _header_value_case_insensitive(headers: Mapping[str, str], name: str) -> str | None:

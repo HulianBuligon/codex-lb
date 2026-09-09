@@ -1,7 +1,7 @@
 """restore the reset warm-up threshold as an active opt-in default
 
 Revision ID: 20260906_000000_restore_limit_warmup_threshold_default
-Revises: 20260908_000000_add_subscription_overflow
+Revises: 20260908_020000_merge_overflow_transport_heads
 Create Date: 2026-09-06
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260906_000000_restore_limit_warmup_threshold_default"
-down_revision = "20260908_000000_add_subscription_overflow"
+down_revision = "20260908_020000_merge_overflow_transport_heads"
 branch_labels = None
 depends_on = None
 
