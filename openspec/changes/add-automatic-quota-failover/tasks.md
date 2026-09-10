@@ -15,6 +15,6 @@ safe continuity and retires exhausted soft affinity.
 - [x] Validate settings, rendered UI, migrations, lint, types and builds.
 - [x] Refresh HomeServer bundle; rehearse migration on production backup.
 - [x] Deploy only Codex LB and verify health and rendered switch.
-- [ ] Commit/push and update existing PR after successful deployment.
+- [x] Commit/push and update existing PR after successful deployment.
 
 No independent review. Do not tune new resilience settings.
