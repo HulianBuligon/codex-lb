@@ -1,97 +1,49 @@
 ## ADDED Requirements
 
-### Requirement: Pre-visible quota failures use bounded account failover
+### Requirement: Quota continuity recovery complements native failover
 
-When an otherwise movable Responses request receives a pre-visible upstream
-`rate_limit_exceeded`, `usage_limit_reached`, `insufficient_quota`,
-`usage_not_included`, or `quota_exceeded` response, and automatic quota
-failover is enabled, the proxy MUST release account-local leases, exclude the
-rejected account, and select another eligible account using the configured
-routing policy. After a replacement is selected, the proxy MUST wait five
-seconds before dispatching it. The proxy MUST perform no more than three
-additional quota attempts for one request and MUST preserve the existing
-overall request deadline. If no replacement is eligible, the proxy MUST
-surface the original quota response without the replacement delay.
+For a pre-visible explicit quota rejection, the proxy MAY release request-local
+dispatch affinity and replay a verified account-neutral full-history
+continuation when quota continuity recovery is enabled. The proxy MUST retain
+native failure classification, account selection, retry counts, and deadlines.
+It MUST NOT add a separate retry budget or artificial delay. Disabling recovery
+MUST NOT disable ordinary native failover for requests that are already movable.
 
-The behavior MUST apply to streaming HTTP/WebSocket egress and HTTP responses
-bridge pre-created requests. It MUST NOT depend on routing strategy,
-earlier-reset preference, or transport policy. It MUST NOT replay after an
-upstream response event or downstream-visible output, and MUST NOT migrate a
-request with uploaded-file, single-account, or other non-reconstructible
-account ownership, including a registered durable operation that still requires
-its owner. Previous-response and turn-state continuations MAY move
-only when the proxy has verified an account-neutral full-history replay:
-the replacement MUST omit the old response anchor and account-scoped turn-state
-header and MUST NOT reassign stored response or file ownership to the replacement.
-HTTP bridge session replacement MUST preserve its existing lease-fenced
-continuity cleanup. Old native WebSocket token/history state MUST remain intact.
-Disabling automatic quota failover MUST
-surface the first qualifying failure without selecting another account.
+The behavior SHALL cover streaming HTTP/WebSocket egress and the HTTP responses
+bridge. Uploaded files, incomplete history, durable operations, accepted work,
+and single-account ownership MUST remain fail-closed. A transferred continuation
+MUST omit obsolete response anchors and account-scoped turn-state headers.
+Stored response/file ownership and unrelated sticky mappings MUST remain intact.
 
-#### Scenario: Rejected account is excluded and another account completes
+#### Scenario: Native failover stays authoritative
 
-- **GIVEN** accounts A and B are eligible for a movable Responses request
-- **AND** account A returns `usage_limit_reached` before any response event
-- **WHEN** automatic quota failover is enabled
-- **THEN** the proxy releases A's request leases and excludes A
-- **AND** it selects B through the configured routing policy
-- **AND** waits for the bounded delay before dispatching B
-- **AND** the client receives B's successful response without A's failure
+- **GIVEN** a movable request and recovery disabled
+- **WHEN** native policy permits a quota retry
+- **THEN** recovery does not suppress that native retry
+- **AND** recovery does not extend its retry count or add a delay
 
-#### Scenario: No eligible replacement preserves the quota response
+#### Scenario: Verified continuation leaves an exhausted owner
 
-- **GIVEN** the selected account returns a qualifying pre-visible quota failure
-- **AND** no other account is eligible
-- **THEN** the proxy surfaces the original quota response and reset metadata
-- **AND** it does not wait for or dispatch a replacement
+- **GIVEN** a rejected continuation with verified account-neutral full history
+- **AND** recovery is enabled and no hard owner requires the original account
+- **WHEN** the native retry path can select another eligible account
+- **THEN** the full body is replayed without obsolete account-local anchors
+- **AND** the existing retry budget and deadline remain authoritative
 
-#### Scenario: Three retries exhaust with the original limit class
+#### Scenario: Unsafe continuity is preserved
 
-- **GIVEN** at least five accounts are otherwise eligible
-- **WHEN** the initial account and each replacement returns an explicit
-  pre-visible quota failure
-- **THEN** the proxy invokes at most four accounts total
-- **AND** waits before each of the three replacement attempts
-- **AND** surfaces the final quota failure without selecting a fifth account
+- **GIVEN** incomplete history, account-scoped files, or durable operation ownership
+- **WHEN** a quota failure occurs
+- **THEN** the request does not cross accounts
 
-#### Scenario: Disabled setting surfaces without account failover
+#### Scenario: Accepted work is not duplicated
 
-- **GIVEN** automatic quota failover is disabled
-- **WHEN** the selected account returns a qualifying pre-visible quota failure
-- **THEN** the proxy surfaces that failure
-- **AND** it does not select another account for that failure
-
-#### Scenario: Generic failure keeps the existing retry budget
-
-- **WHEN** an upstream request fails with a code outside the quota allowlist
-- **THEN** the failure does not expand or consume the quota retry budget
-- **AND** existing failure classification and retry limits remain authoritative
-
-#### Scenario: Hard continuity remains fail-closed
-
-- **GIVEN** a request requires a previous-response, turn-state, uploaded-file,
-  single-account, or other hard account owner
-- **AND** an account-neutral full-history replay cannot be verified
-- **WHEN** that owner returns a qualifying quota failure
-- **THEN** the proxy does not send the request to another account
-- **AND** it surfaces the owner-unavailable or upstream quota terminal defined
-  by the existing continuity contract
-
-#### Scenario: Verified continuation recovers after quota rejection
-
-- **GIVEN** a continuation has a verified, self-contained full-history replay
-- **AND** no registered durable operation or other non-reconstructible
-  account ownership requires its original owner
-- **AND** its owner rejects it with an explicit quota code before acceptance
-- **WHEN** automatic quota failover is enabled
-- **THEN** the proxy retries the full history on another eligible account
-- **AND** the old response id and turn-state token do not cross accounts
-- **AND** the same three-retry ceiling, delay, and request deadline apply
-- **AND** unrelated sticky mappings and old response ownership remain intact
-
-#### Scenario: Visible response is not replayed
-
-- **GIVEN** upstream has emitted a response event or output is downstream-visible
+- **GIVEN** upstream accepted the request or output is downstream-visible
 - **WHEN** a quota terminal arrives
-- **THEN** the proxy does not replay the request on another account
-- **AND** it surfaces the terminal in the existing response lifecycle
+- **THEN** this recovery does not replay the request
+
+#### Scenario: No replacement preserves the upstream quota terminal
+
+- **GIVEN** a quota-rejected request with no eligible replacement
+- **THEN** the original quota class and reset metadata remain available
+- **AND** no additional recovery loop is started

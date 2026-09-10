@@ -3707,13 +3707,9 @@ class _HTTPBridgeUpstreamEventsMixin:
             # above; an accepted anchored follow-up with a proxy-injected
             # anchor and a retry-safe fresh body is replayed here exactly as
             # the capacity-message wait branch replays it.
-            if (
-                (not limit_error or quota_error)
-                and status_request_state is not None
-                and (
-                    status_request_state.previous_response_id is None
-                    or _http_bridge_accepted_anchored_replay_candidate(status_request_state)
-                )
+            if status_request_state is not None and (
+                status_request_state.previous_response_id is None
+                or _http_bridge_accepted_anchored_replay_candidate(status_request_state)
             ):
                 if (
                     quota_error

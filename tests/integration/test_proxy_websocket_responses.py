@@ -9869,7 +9869,7 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
                 )
             ]
         )
-        for index in range(3)
+        for index in range(1)
     ]
     success_upstream = _FakeUpstreamWebSocket(
         [
@@ -9984,13 +9984,11 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
             second_event = json.loads(websocket.receive_text())
 
     assert second_event["type"] == "response.completed"
-    assert connect_models == ["gpt-5.1"] * 4
-    assert handled_error_codes == ["usage_limit_reached"] * 3
+    assert connect_models == ["gpt-5.1"] * 2
+    assert handled_error_codes == ["usage_limit_reached"]
     assert replay_snapshots == [
         (set(), None, 0, False),
-        ({"acct_ws_proxy_1"}, "usage_limit_reached", 1, True),
-        ({"acct_ws_proxy_1", "acct_ws_proxy_2"}, "usage_limit_reached", 2, True),
-        ({"acct_ws_proxy_1", "acct_ws_proxy_2", "acct_ws_proxy_3"}, "usage_limit_reached", 3, True),
+        ({"acct_ws_proxy_1"}, "usage_limit_reached", 1, False),
     ]
     assert all(len(upstream.sent_text) == 1 for upstream in upstreams)
     first_payload = _without_installation_metadata(json.loads(rejected_upstreams[0].sent_text[0]))
@@ -10125,14 +10123,14 @@ def test_backend_responses_websocket_transparently_retries_precreated_error_usag
         with client.websocket_connect("/backend-api/codex/responses") as websocket:
             websocket.send_text(json.dumps(request_payload))
             first_event = json.loads(websocket.receive_text())
-            second_event = json.loads(websocket.receive_text()) if quota_failover_enabled else None
+            second_event = json.loads(websocket.receive_text())
 
-    assert first_event["type"] == ("response.created" if quota_failover_enabled else "error")
+    assert first_event["type"] == "response.created"
     assert second_event is None or second_event["type"] == "response.completed"
-    assert connect_models == ["gpt-5.1"] * (2 if quota_failover_enabled else 1)
+    assert connect_models == ["gpt-5.1"] * 2
     assert handled_error_codes == ["usage_limit_reached"]
     assert len(first_upstream.sent_text) == 1
-    assert len(second_upstream.sent_text) == (1 if quota_failover_enabled else 0)
+    assert len(second_upstream.sent_text) == 1
     if quota_failover_enabled:
         assert _without_installation_metadata(
             json.loads(first_upstream.sent_text[0])
@@ -14215,7 +14213,9 @@ def test_backend_responses_websocket_quota_recovers_verified_turn_state_history(
     assert replay["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
 
 
-def test_backend_responses_websocket_verified_quota_continuation_stops_after_three_retries(app_instance, monkeypatch):
+def test_backend_responses_websocket_verified_quota_continuation_preserves_native_replay_limit(
+    app_instance, monkeypatch
+):
     def rejection():
         return [
             _ws_event(
@@ -14241,8 +14241,6 @@ def test_backend_responses_websocket_verified_quota_continuation_stops_after_thr
         failover.FIRST_ACCOUNT_ID,
         failover.FIRST_ACCOUNT_ID,
         failover.SECOND_ACCOUNT_ID,
-        "acct_quota_c",
-        "acct_quota_d",
     ]
     assert disconnect is None
     assert events[-1]["error"]["code"] == "usage_limit_reached"

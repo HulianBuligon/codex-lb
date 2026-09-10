@@ -166,8 +166,6 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
-    _LIMIT_FAILOVER_ERROR_CODES,
-    _MAX_LIMIT_FAILOVER_RETRIES,
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _api_key_fair_share_threshold_pct_from_settings,
@@ -2548,6 +2546,15 @@ class _HTTPBridgeRequestSubmitMixin:
         if not session.codex_session or session.prewarmed or request_state.previous_response_id is not None:
             request_state.prewarm_status = request_state.prewarm_status or "not_applicable"
             return
+        # M3 codex prewarm: the switch is dashboard-managed, and it reaches this
+        # path through the request-bound overlay already applied by
+        # ``_service_get_settings()`` above (the field is in
+        # ``DASHBOARD_OVERRIDE_SETTINGS``, and the entry-point middleware bound
+        # the snapshot once for this request). Resolving it is therefore a plain
+        # memory read that adds neither a settings read nor an ``await`` -- here
+        # or, more importantly, under ``prewarm_lock`` below, where a cache
+        # refresh could run a DB query and suspend (issues #1971 and #1972
+        # wedged every keyed submit on exactly that pattern).
         if not _http_bridge_prewarm_enabled(settings):
             request_state.prewarm_status = "not_applicable"
             return
@@ -3893,10 +3900,8 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             if transport_only_unanchored_replay:
                 return False
-            quota_replay = quota_failure and request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
             if _websocket_request_can_replay_before_visible_output(
                 request_state,
-                max_replay_count=_MAX_LIMIT_FAILOVER_RETRIES if quota_replay else 1,
             ):
                 return True
             if (
@@ -4043,11 +4048,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 and request_state.response_event_count == 0
                 and request_state.clean_close_replay_count < clean_close_retry_max_count
             )
-            quota_replay = quota_failure and request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
-            if (
-                request_state.replay_count >= (_MAX_LIMIT_FAILOVER_RETRIES if quota_replay else 1)
-                and not additional_clean_close_retry
-            ):
+            if request_state.replay_count >= 1 and not additional_clean_close_retry:
                 return False
             account_bound_replay = False
             if request_state.previous_response_id is not None:

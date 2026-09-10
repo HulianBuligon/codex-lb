@@ -131,7 +131,6 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
-    _LIMIT_FAILOVER_DELAY_SECONDS,
     _REQUEST_TRANSPORT_HTTP,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _http_bridge_session_supports_service_tier,
@@ -3361,7 +3360,17 @@ def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
 
 
 def _http_bridge_prewarm_enabled(settings: Any) -> bool:
-    """Prewarm eligibility is the ``prewarm_enabled`` flag alone.
+    """Prewarm eligibility is the ``prewarm_enabled`` switch alone.
+
+    M3 codex prewarm: the switch is dashboard-managed, and it is folded into
+    ``settings`` before this is called. ``settings`` is the proxy service facade
+    value (``_service_get_settings()``), which applies the request-bound
+    dashboard overlay: the field is in ``DASHBOARD_OVERRIDE_SETTINGS``, so a
+    non-NULL ``dashboard_settings`` column has already won over the deprecated
+    ``CODEX_LB_*`` env alias by the time this reads it. Outside a bound request
+    context (startup, schedulers, unit tests) the env alias applies, and then
+    the code default (off) -- the same precedence ``resolve_inheritable``
+    applies for the settings API's provenance.
 
     The canary percent and allow/deny cohort scaffolding was one-time
     rollout tooling retired by ``reduce-settings-surface-phase-4``.
@@ -3455,19 +3464,6 @@ def _http_bridge_reconnect_connect_failure(
     if isinstance(exc, ProxyResponseError):
         return exc
     raise exc
-
-
-def _require_quota_failover_delay_budget(remaining_budget: float) -> None:
-    if remaining_budget > _LIMIT_FAILOVER_DELAY_SECONDS:
-        return
-    raise ProxyResponseError(
-        504,
-        openai_error(
-            "upstream_request_timeout",
-            "Proxy request budget exhausted before quota failover delay",
-            error_type="server_error",
-        ),
-    )
 
 
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:

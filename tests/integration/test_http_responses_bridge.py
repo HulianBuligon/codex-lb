@@ -21,9 +21,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
 
+import app.core.middleware.dashboard_overrides as dashboard_overrides_middleware_module
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage as _FakeUpstreamMessage
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry
 from app.core.utils.request_id import (
@@ -220,6 +222,7 @@ def _make_dashboard_settings(
     gateway_safe_mode: bool = False,
     prompt_cache_idle_ttl_seconds: int | float = 3600,
     quota_failover_enabled: bool = True,
+    codex_prewarm_enabled: bool | None = None,
 ) -> DashboardSettings:
     return DashboardSettings(
         id=1,
@@ -237,6 +240,8 @@ def _make_dashboard_settings(
         api_key_auth_enabled=False,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=int(prompt_cache_idle_ttl_seconds),
         http_responses_session_bridge_gateway_safe_mode=gateway_safe_mode,
+        # M3 codex prewarm: NULL inherits the env alias passed to _make_app_settings.
+        http_responses_session_bridge_codex_prewarm_enabled=codex_prewarm_enabled,
         sticky_reallocation_budget_threshold_pct=95.0,
     )
 
@@ -249,7 +254,14 @@ def _install_proxy_settings(
     admission_wait_timeout_seconds: float = 0.05,
 ) -> None:
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache(dashboard_settings))
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    # The request entry point binds the dashboard overlay from the settings-cache
+    # snapshot, and the proxy facade applies it to every ``Settings`` read; point
+    # the middleware at the same fake row so the dashboard-managed switches (M3
+    # codex prewarm) reach the bridge the way they do in production.
+    monkeypatch.setattr(
+        dashboard_overrides_middleware_module, "get_settings_cache", lambda: _SettingsCache(dashboard_settings)
+    )
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: with_dashboard_overrides(app_settings))
     # The admission wait is a fixed constant (ADMISSION_WAIT_TIMEOUT_SECONDS); the
     # bridge tests shorten it through the service's module-level seam.
     monkeypatch.setattr(proxy_module, "_proxy_admission_wait_timeout_seconds", lambda: admission_wait_timeout_seconds)
@@ -278,6 +290,7 @@ def _install_bridge_settings_with_limits(
     codex_idle_ttl_seconds: float = 900.0,
     prompt_cache_idle_ttl_seconds: float = 3600.0,
     codex_prewarm_enabled: bool = False,
+    codex_prewarm_dashboard: bool | None = None,
     gateway_safe_mode: bool = False,
     prefer_earlier_reset_accounts: bool = False,
     quota_failover_enabled: bool = True,
@@ -302,6 +315,7 @@ def _install_bridge_settings_with_limits(
             gateway_safe_mode=gateway_safe_mode,
             prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
             quota_failover_enabled=quota_failover_enabled,
+            codex_prewarm_enabled=codex_prewarm_dashboard,
         ),
     )
 
@@ -2094,6 +2108,141 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
 
     assert select_calls == [(True, "priority")]
     await service._close_http_bridge_session(session)
+
+
+def _install_codex_prewarm_bridge_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    account: Account,
+    fake_upstream: _FakeBridgeUpstreamWebSocket,
+) -> None:
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+            preferred_account_id,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_codex_prewarm_dashboard_on_beats_env_off(async_client, monkeypatch):
+    """M3 codex prewarm: the dashboard switch (on) wins over the deprecated env
+    alias (off): the first turn of a new Codex session is preceded by exactly one
+    ``generate=false`` warm-up."""
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        codex_idle_ttl_seconds=600.0,
+        codex_prewarm_enabled=False,
+        codex_prewarm_dashboard=True,
+    )
+    account_id = await _import_account(
+        async_client, "acc_http_bridge_prewarm_dash_on", "http-bridge-prewarm-dash-on@example.com"
+    )
+    fake_upstream = _PrewarmingBridgeUpstreamWebSocket()
+    account = await _get_account(account_id)
+    _install_codex_prewarm_bridge_fakes(monkeypatch, account=account, fake_upstream=fake_upstream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"x-codex-turn-state": "turn_state_prewarm_dash_on"},
+        json={
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_actual_2"
+    assert len(fake_upstream.sent_text) == 2
+    assert json.loads(fake_upstream.sent_text[0])["generate"] is False
+    assert "generate" not in json.loads(fake_upstream.sent_text[1])
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_codex_prewarm_dashboard_off_beats_env_on(async_client, monkeypatch):
+    """M3 codex prewarm: the dashboard switch (off) wins over the deprecated env
+    alias (on): no warm-up is sent, the visible turn is the only upstream request."""
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        codex_idle_ttl_seconds=600.0,
+        codex_prewarm_enabled=True,
+        codex_prewarm_dashboard=False,
+    )
+    account_id = await _import_account(
+        async_client, "acc_http_bridge_prewarm_dash_off", "http-bridge-prewarm-dash-off@example.com"
+    )
+    fake_upstream = _PrewarmingBridgeUpstreamWebSocket()
+    account = await _get_account(account_id)
+    _install_codex_prewarm_bridge_fakes(monkeypatch, account=account, fake_upstream=fake_upstream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"x-codex-turn-state": "turn_state_prewarm_dash_off"},
+        json={
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_actual_1"
+    assert len(fake_upstream.sent_text) == 1
+    assert "generate" not in json.loads(fake_upstream.sent_text[0])
 
 
 @pytest.mark.asyncio
@@ -13264,7 +13413,6 @@ async def test_v1_responses_http_bridge_preserves_rate_limit_metadata_in_429(asy
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_quota_limit_retries_on_another_account(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
-    monkeypatch.setattr(http_bridge_mixin_module, "_LIMIT_FAILOVER_DELAY_SECONDS", 0.0)
     first_id = await _import_account(
         async_client,
         "acc_http_bridge_quota_first",
@@ -13331,7 +13479,7 @@ async def test_v1_responses_http_bridge_quota_limit_retries_on_another_account(a
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_quota_failover_does_not_sleep_past_deadline(
+async def test_v1_responses_http_bridge_quota_recovery_adds_no_artificial_delay(
     async_client,
     app_instance,
     monkeypatch,
@@ -13399,16 +13547,15 @@ async def test_v1_responses_http_bridge_quota_failover_does_not_sleep_past_deadl
         },
     )
 
-    assert response.status_code == 429
-    assert response.json()["error"]["code"] == "rate_limit_exceeded"
-    assert connect_count == 1
+    assert response.status_code == 200
+    assert "response.completed" in response.text
+    assert connect_count == 2
     assert delays == []
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_quota_failover_stops_after_three_retries(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_quota_recovery_preserves_native_replay_limit(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
-    monkeypatch.setattr(http_bridge_mixin_module, "_LIMIT_FAILOVER_DELAY_SECONDS", 0.0)
     accounts: list[Account] = []
     for index in range(5):
         account_id = await _import_account(
@@ -13462,13 +13609,13 @@ async def test_v1_responses_http_bridge_quota_failover_stops_after_three_retries
 
     assert response.status_code == 429
     assert response.json()["error"]["code"] == "rate_limit_exceeded"
-    assert selected_ids == [account.id for account in accounts[:4]]
-    assert connect_count == 4
-    assert [len(upstream.sent_text) for upstream in upstreams] == [1, 1, 1, 1, 0]
+    assert selected_ids == [account.id for account in accounts[:2]]
+    assert connect_count == 2
+    assert [len(upstream.sent_text) for upstream in upstreams] == [1, 1, 0, 0, 0]
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_quota_failover_disabled_surfaces_without_retry(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_quota_recovery_disabled_preserves_native_retry(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True, quota_failover_enabled=False)
     first_id = await _import_account(
         async_client,
@@ -13527,8 +13674,7 @@ async def test_v1_responses_http_bridge_quota_failover_disabled_surfaces_without
 
     assert response.status_code == 429
     assert response.json()["error"]["code"] == "rate_limit_exceeded"
-    assert selected_ids == [first.id]
-    assert second.id not in selected_ids
+    assert selected_ids == [first.id, second.id]
 
 
 @pytest.mark.asyncio

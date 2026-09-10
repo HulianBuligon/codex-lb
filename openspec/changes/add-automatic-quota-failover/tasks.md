@@ -1,52 +1,20 @@
-## 1. Contract
+# Quota continuity recovery implementation plan
 
-- [x] 1.1 Define the explicit quota-code allowlist, pre-visible replay boundary,
-  three-retry/five-second limits, and account exclusion behavior.
-- [x] 1.2 Define soft-affinity retirement and hard-continuity preservation.
-- [x] 1.3 Define the default-on persisted kill switch and routing UI behavior.
-- [x] 1.4 Define additive migration and downgrade behavior.
+**Goal:** Remove retry overlap, preserve continuity recovery, relocate the switch,
+deploy latest main with three patches, then update PR #2207.
+**Architecture:** Native retry/selection stays authoritative; the patch prepares
+safe continuity and retires exhausted soft affinity.
+**Spec:** specs/responses-api-compat/spec.md and specs/frontend-architecture/spec.md.
 
-## 2. Implementation
+## Tasks
 
-- [x] 2.1 Add bounded quota failover to streaming Responses requests without
-  widening the generic retry budget.
-- [x] 2.2 Add the same exclusion and retry budget to direct WebSocket and HTTP
-  bridge pre-created requests.
-- [x] 2.3 Retire only exhausted soft sticky owners with compare-and-set.
-- [x] 2.4 Persist `quota_failover_enabled` and expose it through settings API,
-  cache, frontend schema, payload, switch, mocks, and locales.
+- [x] Incorporate latest main on the existing branch.
+- [x] Test that recovery does not suppress ordinary failover or extend retries.
+- [x] Remove extra retry counters/delays and relocate/reword the switch.
+- [ ] Validate streaming, WebSocket, bridge, continuity and ownership regressions.
+- [ ] Validate settings, rendered UI, migrations, lint, types and builds.
+- [ ] Refresh HomeServer bundle; rehearse migration on production backup.
+- [ ] Deploy only Codex LB and verify health and rendered switch.
+- [ ] Commit/push and update existing PR after successful deployment.
 
-## 3. Coverage
-
-- [x] 3.1 Cover HTTP and serialized-SSE quota responses, account exclusion,
-  three retries, kill-switch behavior, and soft-pin safety.
-- [x] 3.2 Cover direct WebSocket and HTTP bridge success, three-retry ceiling,
-  disabled behavior, and deadline safety.
-- [x] 3.3 Cover settings default/persistence, frontend parsing/render/save, and
-  audit changed fields.
-- [x] 3.4 Cover migration upgrade, defaulted existing row, downgrade,
-  re-upgrade, single-head graph, and schema drift.
-
-## 4. Verification
-
-- [x] 4.1 Run focused proxy, settings, frontend, and migration tests.
-- [x] 4.2 Run backend/frontend lint, typecheck, build, and relevant regression
-  suites.
-- [x] 4.3 Validate this change strictly and validate all canonical specs.
-- [x] 4.4 Capture before/after dashboard evidence and proxy output evidence.
-- [x] 4.5 Review the final consolidated diff once before publication.
-
-## 5. Publication
-
-- [x] 5.1 Push the feature branch to the contributor fork and open a PR against
-  `Soju06/codex-lb:main` using the repository template.
-
-## 6. Verified continuation quota recovery
-
-- [x] 6.1 Permit pre-created quota recovery from a continuation only when an
-  account-neutral full-history replay has been verified; preserve file and
-  unreconstructible ownership, API-key scope, and non-quota retry behavior.
-- [x] 6.2 Release obsolete request-local continuity on recovery without globally
-  deleting sticky mappings or moving account-scoped turn-state headers.
-- [x] 6.3 Test enabled/disabled continuation recovery, safety exclusions, and
-  bounded retries; validate without another review.
+No independent review. Do not tune new resilience settings.

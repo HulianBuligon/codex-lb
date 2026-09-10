@@ -604,21 +604,6 @@ export function RoutingSettings({
             </Select>
           </div>
 
-          <div className="flex items-center justify-between gap-4 p-3">
-            <div>
-              <p className="text-sm font-medium">{t("settings.routing.quotaFailover.label")}</p>
-              <p className="text-xs text-muted-foreground">
-                {t("settings.routing.quotaFailover.description")}
-              </p>
-            </div>
-            <Switch
-              checked={settings.quotaFailoverEnabled}
-              disabled={busy}
-              onCheckedChange={(quotaFailoverEnabled) => save({ quotaFailoverEnabled })}
-              aria-label={t("settings.routing.quotaFailover.ariaLabel")}
-            />
-          </div>
-
           <div className="space-y-2 p-3">
             <div>
               <p className="text-sm font-medium">{t("settings.routing.strategy.label")}</p>

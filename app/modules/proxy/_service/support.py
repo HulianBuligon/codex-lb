@@ -119,8 +119,8 @@ _LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset(
     {"account_response_create_cap", "account_stream_cap", "api_key_stream_fair_share"}
 )
 _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE = "account_model_unsupported"
-# Explicit account-local quota responses are the only upstream failures that
-# may use the bounded quota failover path. The retry budget is per request.
+# Explicit account-local quota responses that may release verified continuity.
+# Existing transport retry budgets remain authoritative.
 _LIMIT_FAILOVER_ERROR_CODES = frozenset(
     {
         "rate_limit_exceeded",
@@ -133,8 +133,6 @@ _LIMIT_FAILOVER_ERROR_CODES = frozenset(
 _USAGE_EXHAUSTION_ERROR_CODES = frozenset(
     {"usage_limit_reached", "insufficient_quota", "usage_not_included", "quota_exceeded"}
 )
-_MAX_LIMIT_FAILOVER_RETRIES = 3
-_LIMIT_FAILOVER_DELAY_SECONDS = 5.0
 _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_wait",
     default=None,
@@ -1060,7 +1058,6 @@ class _WebSocketRequestState:
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
-    quota_failover_delay_pending: bool = False
     quota_failover_detached_continuity: bool = False
     # Counts only the one extra replay permitted after the initial recovery
     # replay when the replacement upstream socket also closes cleanly before
@@ -1708,7 +1705,6 @@ def _websocket_request_can_replay_before_visible_output(
     request_state: _WebSocketRequestState,
     *,
     allow_clean_close_retry: bool = False,
-    max_replay_count: int = 1,
 ) -> bool:
     if not request_state.request_text:
         return False
@@ -1719,7 +1715,7 @@ def _websocket_request_can_replay_before_visible_output(
     # once; a clean close of the replacement socket before its
     # ``response.created`` surfaces one terminal under the visible id instead
     # of a third send (openspec: retry-accepted-output-free-capacity-failures).
-    if request_state.replay_count >= max_replay_count and not (
+    if request_state.replay_count >= 1 and not (
         allow_clean_close_retry
         and request_state.replay_count == 1
         and request_state.response_event_count == 0

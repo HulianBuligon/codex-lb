@@ -288,8 +288,6 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
-    _LIMIT_FAILOVER_ERROR_CODES,
-    _MAX_LIMIT_FAILOVER_RETRIES,
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _affinity_may_resolve_hard_owner,
@@ -1018,11 +1016,7 @@ def _websocket_precreated_retry_error_code(
         _websocket_event_error_code(event_type, payload),
         _websocket_event_error_type(event_type, payload),
     )
-    quota_replay = (
-        request_state.precreated_replay_reason in _LIMIT_FAILOVER_ERROR_CODES
-        and error_code in _LIMIT_FAILOVER_ERROR_CODES
-    )
-    if request_state.replay_count >= (_MAX_LIMIT_FAILOVER_RETRIES if quota_replay else 1):
+    if request_state.replay_count >= 1:
         return None
     error_param = _websocket_event_error_param(event_type, payload)
     error_message = _websocket_event_error_message(event_type, payload)

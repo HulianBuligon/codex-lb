@@ -23539,7 +23539,7 @@ async def test_connect_proxy_websocket_uses_transport_aware_request_deadline(
 
 
 @pytest.mark.asyncio
-async def test_connect_proxy_websocket_delays_quota_replacement_before_open(monkeypatch):
+async def test_connect_proxy_websocket_opens_quota_replacement_without_extra_delay(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     rejected_account = _make_account("acc_ws_quota_rejected")
     replacement_account = _make_account("acc_ws_quota_replacement")
@@ -23574,7 +23574,6 @@ async def test_connect_proxy_websocket_delays_quota_replacement_before_open(monk
         precreated_replay_reason="usage_limit_reached",
         precreated_replay_account_id=rejected_account.id,
     )
-    request_state.quota_failover_delay_pending = True
 
     selected_account, selected_upstream = await service._connect_proxy_websocket(
         {},
@@ -23591,9 +23590,8 @@ async def test_connect_proxy_websocket_delays_quota_replacement_before_open(monk
 
     assert selected_account is replacement_account
     assert selected_upstream is upstream
-    assert delays == [5.0]
+    assert delays == []
     open_attempt.assert_awaited_once()
-    assert request_state.quota_failover_delay_pending is False
 
 
 @pytest.mark.asyncio
@@ -40325,7 +40323,7 @@ async def test_stream_post_refresh_401_fails_over_instead_of_retrying_same_accou
 
 
 @pytest.mark.asyncio
-async def test_stream_post_refresh_quota_respects_disabled_failover(monkeypatch):
+async def test_stream_post_refresh_quota_preserves_native_failover_when_recovery_disabled(monkeypatch):
     settings = _make_proxy_settings()
     settings.quota_failover_enabled = False
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -40368,14 +40366,14 @@ async def test_stream_post_refresh_quota_respects_disabled_failover(monkeypatch)
 
     assert len(chunks) == 1
     event = json.loads(chunks[0].split("data: ", 1)[1])
-    assert event["type"] == "response.failed"
-    assert event["response"]["error"]["code"] == "usage_limit_reached"
-    assert seen_excluded_account_ids == [set()]
-    assert stream_account_ids == [account_a.chatgpt_account_id] * 2
+    assert event["type"] == "response.completed"
+    assert event["response"]["id"] == "unexpected_quota_failover"
+    assert seen_excluded_account_ids == [set(), {account_a.id}]
+    assert stream_account_ids == [account_a.chatgpt_account_id] * 2 + [account_b.chatgpt_account_id]
 
 
 @pytest.mark.asyncio
-async def test_stream_post_refresh_quota_uses_bounded_delayed_failover(monkeypatch):
+async def test_stream_post_refresh_quota_uses_native_failover_without_extra_delay(monkeypatch):
     settings = _make_proxy_settings()
     settings.quota_failover_enabled = True
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -40429,7 +40427,7 @@ async def test_stream_post_refresh_quota_uses_bounded_delayed_failover(monkeypat
         account_a.chatgpt_account_id,
         account_b.chatgpt_account_id,
     ]
-    assert delays == [5.0]
+    assert delays == []
 
 
 @pytest.mark.asyncio
@@ -55746,8 +55744,8 @@ async def test_stream_responses_coded_429_keeps_rate_limit_failover_path(monkeyp
     assert any("resp_coded_429_failover" in chunk for chunk in chunks)
     assert "failure_class=rate_limit action=failover_next" in caplog.text
     assert "action=retry_same_account" not in caplog.text
-    # Coded quota failures use the quota failover delay, not burst backoff.
-    assert scheduler.sleeps == [5.0]
+    # Native coded-quota failover has no additional recovery delay.
+    assert scheduler.sleeps == []
     mark_rate_limit_mock = cast(AsyncMock, service._load_balancer.mark_rate_limit)
     mark_rate_limit_mock.assert_awaited_once()
     assert mark_rate_limit_mock.await_args is not None

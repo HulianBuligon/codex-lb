@@ -755,12 +755,13 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_transport", ["http", "sse"])
-async def test_stream_quota_failover_disabled_surfaces_first_limit_and_preserves_soft_pin(
-    async_client, monkeypatch, error_transport
-):
+async def test_stream_recovery_disabled_preserves_native_quota_failover(async_client, monkeypatch, error_transport):
     first_id = await _import_account(async_client, "acc_stream_disabled_a", "stream-disabled-a@example.com")
     await _import_account(async_client, "acc_stream_disabled_b", "stream-disabled-b@example.com")
-    settings_response = await async_client.put("/api/settings", json={"quotaFailoverEnabled": False})
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={"quotaFailoverEnabled": False, "deterministicFailoverEnabled": True},
+    )
     assert settings_response.status_code == 200
 
     async with SessionLocal() as session:
@@ -774,6 +775,9 @@ async def test_stream_quota_failover_disabled_surfaces_first_limit_and_preserves
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
+        if account_id == "acc_stream_disabled_b":
+            yield _success_sse_event("resp_native_failover_ok")
+            return
         if error_transport == "sse":
             yield _sse_event(
                 {
@@ -808,20 +812,9 @@ async def test_stream_quota_failover_disabled_surfaces_first_limit_and_preserves
         },
     )
 
-    assert response.status_code == (429 if error_transport == "http" else 200)
-    assert seen_account_ids == ["acc_stream_disabled_a"]
-    if error_transport == "sse":
-        terminal = _extract_events(response.text.splitlines())[-1]
-        assert terminal["response"]["error"]["resets_at"] == 1_700_000_000
-        assert terminal["response"]["error"]["resets_in_seconds"] == 3_600
-    async with SessionLocal() as session:
-        assert (
-            await StickySessionsRepository(session).get_account_id(
-                "disabled-quota-cache",
-                kind=StickySessionKind.PROMPT_CACHE,
-            )
-            == first_id
-        )
+    assert response.status_code == 200
+    assert seen_account_ids == ["acc_stream_disabled_a", "acc_stream_disabled_b"]
+    assert _extract_events(response.text.splitlines())[-1]["response"]["id"] == "resp_native_failover_ok"
 
 
 @pytest.mark.asyncio
@@ -872,7 +865,9 @@ async def test_stream_connect_phase_429_with_retained_item_does_not_wedge_on_pay
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_transport", ["http", "sse"])
-async def test_stream_usage_limit_failover_is_bounded_to_three_retries(async_client, monkeypatch, error_transport):
+async def test_stream_recovery_uses_native_attempt_budget_without_extra_delay(
+    async_client, monkeypatch, error_transport
+):
     for index in range(5):
         await _import_account(async_client, f"acc_stream_limit_bound_{index}", f"limit-bound-{index}@example.com")
     delays: list[float] = []
@@ -930,8 +925,8 @@ async def test_stream_usage_limit_failover_is_bounded_to_three_retries(async_cli
         assert events[-1]["response"]["error"]["code"] == "usage_limit_reached"
         assert events[-1]["response"]["error"]["resets_at"] == 1_700_000_000
         assert events[-1]["response"]["error"]["resets_in_seconds"] == 3_600
-    assert len(seen_account_ids) == 4
-    assert delays.count(5.0) == 3
+    assert len(seen_account_ids) == 3
+    assert delays.count(5.0) == 0
     assert all(account_id is not None for account_id in seen_account_ids)
     assert all(
         account_id is not None and account_id.startswith(f"acc_stream_limit_bound_{index}")
@@ -940,7 +935,7 @@ async def test_stream_usage_limit_failover_is_bounded_to_three_retries(async_cli
 
 
 @pytest.mark.asyncio
-async def test_stream_quota_failover_does_not_sleep_past_request_deadline(async_client, monkeypatch):
+async def test_stream_quota_recovery_adds_no_artificial_delay(async_client, monkeypatch):
     await _import_account(async_client, "acc_stream_quota_deadline_a", "quota-deadline-a@example.com")
     await _import_account(async_client, "acc_stream_quota_deadline_b", "quota-deadline-b@example.com")
     delays: list[float] = []
@@ -977,8 +972,8 @@ async def test_stream_quota_failover_does_not_sleep_past_request_deadline(async_
     )
 
     events = _extract_events(response.text.splitlines())
-    assert events[-1]["response"]["error"]["code"] == "upstream_request_timeout"
-    assert seen_account_ids == ["acc_stream_quota_deadline_a"]
+    assert events[-1]["response"]["id"] == "unexpected_quota_deadline_dispatch"
+    assert seen_account_ids == ["acc_stream_quota_deadline_a", "acc_stream_quota_deadline_b"]
     assert delays == []
 
 
@@ -1012,7 +1007,7 @@ async def test_stream_terminal_error_retires_only_exhausted_soft_pin(
         yield ""  # pragma: no cover
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 3)
     response = await async_client.post(
         "/v1/responses",
         json={
@@ -1052,7 +1047,7 @@ async def test_stream_quota_cleanup_preserves_concurrently_reassigned_pin(async_
         yield _success_sse_event("resp_race_ok")
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
-    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 3)
     response = await async_client.post(
         "/v1/responses",
         json={

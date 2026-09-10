@@ -1,24 +1,23 @@
 ## ADDED Requirements
 
-### Requirement: Routing settings expose automatic quota failover
+### Requirement: Resilience settings expose quota continuity recovery
 
-The dashboard Routing settings section SHALL expose an accessible switch for
-`quotaFailoverEnabled`. The setting SHALL default to enabled when omitted from
-a mixed-version payload, SHALL save through the existing settings API, and
-SHALL explain that explicit quota-limit responses can be retried on another
-eligible account up to three additional times. The label, description, and
-accessible name MUST exist in English, Korean, and Simplified Chinese locale
-bundles.
+The dashboard SHALL expose an accessible default-on `quotaFailoverEnabled`
+switch in Advanced → Resilience, directly below Deterministic failover.
+Its label SHALL be "Quota continuity recovery". Its description SHALL explain
+soft-affinity release and verified full-history recovery without claiming a new
+retry loop or retry limit. English, Korean, and Simplified Chinese strings
+SHALL be provided. The switch SHALL use the existing settings API.
 
-#### Scenario: Operator disables automatic quota failover
+#### Scenario: Recovery is independently disabled
 
-- **GIVEN** the Routing settings section shows automatic quota failover enabled
-- **WHEN** the operator activates the switch
-- **THEN** the dashboard sends `quotaFailoverEnabled: false` through the
-  settings API
-- **AND** the saved state renders disabled
+- **GIVEN** recovery and Deterministic failover are enabled
+- **WHEN** the operator disables recovery
+- **THEN** the saved recovery value is false
+- **AND** the native resilience switches remain unchanged
+- **AND** Routing does not display a duplicate recovery switch
 
-#### Scenario: Mixed-version response receives safe default
+#### Scenario: Existing default is retained
 
-- **WHEN** a dashboard settings response omits `quotaFailoverEnabled`
-- **THEN** the frontend schema resolves it to enabled
+- **WHEN** a settings response omits `quotaFailoverEnabled`
+- **THEN** the frontend resolves recovery to enabled
