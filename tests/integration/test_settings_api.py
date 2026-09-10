@@ -104,7 +104,6 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4,5,6"
     assert payload["weeklyPaceSmoothingMinutes"] == 30
     assert payload["limitWarmupStaggeredIdleEnabled"] is False
-
     response = await async_client.put(
         "/api/settings",
         json={

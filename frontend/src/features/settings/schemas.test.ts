@@ -450,6 +450,12 @@ describe("SettingsUpdateRequestSchema", () => {
       }).success,
     ).toBe(true);
     expect(
+      DashboardSettingsSchema.safeParse({
+        ...createDashboardSettings(),
+        limitWarmupExhaustedThresholdPercent: 0,
+      }).success,
+    ).toBe(true);
+    expect(
       SettingsUpdateRequestSchema.safeParse({
         stickyThreadsEnabled: false,
         preferEarlierResetAccounts: true,
