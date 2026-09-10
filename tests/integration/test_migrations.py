@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
 from anyio import to_thread
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
@@ -96,6 +100,69 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
 
     rerun = await run_startup_migrations(_DATABASE_URL)
     assert rerun.current_revision == _HEAD_REVISION
+
+
+def test_staged_limit_warmup_reset_threshold_is_nullable_unbackfilled_and_reversible(tmp_path: Path):
+    db_path = tmp_path / "staged_limit_warmup_threshold.db"
+    config = Config()
+    config.set_main_option(
+        "script_location",
+        str((Path(__file__).resolve().parents[2] / "app/db/alembic").resolve()),
+    )
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+
+    previous_revision = "20260909_120000_dashboard_conversation_archive"
+    command.upgrade(config, previous_revision)
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = sa.inspect(engine)
+        assert "limit_warmup_reset_threshold_percent" not in {
+            str(column["name"]) for column in inspector.get_columns("dashboard_settings")
+        }
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT limit_warmup_exhausted_threshold_percent FROM dashboard_settings WHERE id = 1")
+                ).scalar_one()
+                == 99.0
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = sa.inspect(engine)
+        columns = {str(column["name"]): column for column in inspector.get_columns("dashboard_settings")}
+        assert columns["limit_warmup_reset_threshold_percent"]["nullable"] is True
+        assert columns["limit_warmup_reset_threshold_percent"]["default"] is None
+        with engine.connect() as connection:
+            values = connection.execute(
+                text(
+                    "SELECT limit_warmup_reset_threshold_percent, "
+                    "limit_warmup_exhausted_threshold_percent FROM dashboard_settings WHERE id = 1"
+                )
+            ).one()
+        assert values == (None, 99.0)
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, previous_revision)
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        inspector = sa.inspect(engine)
+        columns = {str(column["name"]) for column in inspector.get_columns("dashboard_settings")}
+        assert "limit_warmup_reset_threshold_percent" not in columns
+        assert "limit_warmup_exhausted_threshold_percent" in columns
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT limit_warmup_exhausted_threshold_percent FROM dashboard_settings WHERE id = 1")
+                ).scalar_one()
+                == 99.0
+            )
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.asyncio

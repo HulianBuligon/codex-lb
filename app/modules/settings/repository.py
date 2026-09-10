@@ -17,6 +17,7 @@ from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.db.models import DashboardSettings, ModelContextWindowOverride
 
 _SETTINGS_ID = 1
+_LEGACY_LIMIT_WARMUP_ZERO_COMPAT_VALUE = 99.0
 
 
 class SettingsRepository:
@@ -373,7 +374,11 @@ class SettingsRepository:
         if limit_warmup_cooldown_seconds is not None:
             settings.limit_warmup_cooldown_seconds = limit_warmup_cooldown_seconds
         if limit_warmup_exhausted_threshold_percent is not None:
-            settings.limit_warmup_exhausted_threshold_percent = limit_warmup_exhausted_threshold_percent
+            settings.limit_warmup_exhausted_threshold_percent = (
+                _LEGACY_LIMIT_WARMUP_ZERO_COMPAT_VALUE
+                if limit_warmup_exhausted_threshold_percent == 0.0
+                else limit_warmup_exhausted_threshold_percent
+            )
         if limit_warmup_idle_threshold_percent is not None:
             settings.limit_warmup_idle_threshold_percent = limit_warmup_idle_threshold_percent
         if limit_warmup_min_available_percent is not None:

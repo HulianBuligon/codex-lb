@@ -448,7 +448,13 @@ describe("SettingsUpdateRequestSchema", () => {
         preferEarlierResetAccounts: true,
         limitWarmupExhaustedThresholdPercent: 0,
       }).success,
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      DashboardSettingsSchema.safeParse({
+        ...createDashboardSettings(),
+        limitWarmupExhaustedThresholdPercent: 0,
+      }).success,
+    ).toBe(true);
     expect(
       SettingsUpdateRequestSchema.safeParse({
         stickyThreadsEnabled: false,

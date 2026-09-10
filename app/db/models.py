@@ -1134,6 +1134,11 @@ class DashboardSettings(Base):
         server_default=text("3600"),
         nullable=False,
     )
+    limit_warmup_reset_threshold_percent_compat: Mapped[float | None] = mapped_column(
+        "limit_warmup_reset_threshold_percent",
+        Float,
+        nullable=True,
+    )
     limit_warmup_exhausted_threshold_percent: Mapped[float] = mapped_column(
         Float,
         default=99.0,

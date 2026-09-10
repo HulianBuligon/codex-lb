@@ -104,7 +104,6 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4,5,6"
     assert payload["weeklyPaceSmoothingMinutes"] == 30
     assert payload["limitWarmupStaggeredIdleEnabled"] is False
-
     response = await async_client.put(
         "/api/settings",
         json={
@@ -248,6 +247,44 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupMinAvailablePercent"] == 99.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4"
     assert payload["weeklyPaceSmoothingMinutes"] == 120
+
+
+@pytest.mark.asyncio
+async def test_settings_api_accepts_zero_threshold_during_compatibility_rollout(async_client):
+    configured = await async_client.put(
+        "/api/settings",
+        json={"limitWarmupExhaustedThresholdPercent": 98.0},
+    )
+    assert configured.status_code == 200
+
+    response = await async_client.put(
+        "/api/settings",
+        json={"limitWarmupExhaustedThresholdPercent": 0.0},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["limitWarmupExhaustedThresholdPercent"] == 99.0
+
+    async with SessionLocal() as session:
+        row = await session.get(DashboardSettings, 1)
+        assert row is not None
+        assert row.limit_warmup_exhausted_threshold_percent == 99.0
+
+
+@pytest.mark.asyncio
+async def test_settings_api_response_accepts_zero_threshold_during_compatibility_rollout(async_client):
+    initial = await async_client.get("/api/settings")
+    assert initial.status_code == 200
+
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE dashboard_settings SET limit_warmup_exhausted_threshold_percent = 0.0 WHERE id = 1")
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["limitWarmupExhaustedThresholdPercent"] == 0.0
 
 
 @pytest.mark.asyncio
