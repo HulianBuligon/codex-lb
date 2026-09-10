@@ -11,10 +11,10 @@ safe continuity and retires exhausted soft affinity.
 - [x] Incorporate latest main on the existing branch.
 - [x] Test that recovery does not suppress ordinary failover or extend retries.
 - [x] Remove extra retry counters/delays and relocate/reword the switch.
-- [ ] Validate streaming, WebSocket, bridge, continuity and ownership regressions.
-- [ ] Validate settings, rendered UI, migrations, lint, types and builds.
-- [ ] Refresh HomeServer bundle; rehearse migration on production backup.
-- [ ] Deploy only Codex LB and verify health and rendered switch.
+- [x] Validate streaming, WebSocket, bridge, continuity and ownership regressions.
+- [x] Validate settings, rendered UI, migrations, lint, types and builds.
+- [x] Refresh HomeServer bundle; rehearse migration on production backup.
+- [x] Deploy only Codex LB and verify health and rendered switch.
 - [ ] Commit/push and update existing PR after successful deployment.
 
 No independent review. Do not tune new resilience settings.
