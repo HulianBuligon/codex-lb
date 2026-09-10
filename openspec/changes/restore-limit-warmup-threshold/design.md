@@ -57,42 +57,26 @@ and the numeric control uses `min={0}`. Repository/model defaults and the
 active storage server default all use `0.0`, so new settings rows and API/UI
 defaults agree.
 
-### Expand active storage with mixed-version synchronization
+### Activate the staged column directly
 
-The migration retains `limit_warmup_exhausted_threshold_percent` and its
-`99.0` server default as compatibility storage for replicas running the parent
-application schema. It adds `limit_warmup_reset_threshold_percent` with a
-`0.0` default. Only a legacy `99.0` row whose optimistic-lock version is still
-`1` and whose creation/update timestamps still match is reliably pristine and
-maps to `0.0`; a `99.0` row with either evidence of an update is preserved
-conservatively, and every non-`99.0` value is copied unchanged.
+The activation migration depends on the compatibility revision. It updates all
+existing `NULL` staged values to `0.0`, then changes that already-existing
+column to non-null with a `0.0` server default. The ORM exposes the public
+setting only through this active column and keeps the legacy column mapped under
+an internal name solely to prevent schema drift. It performs no dual write and
+does not create database triggers.
 
-The ORM keeps the public Python/API attribute on the new column and maps the
-old column under an explicit legacy-only attribute. Current writes update both
-columns in one optimistic-lock transaction. A positive value is identical in
-both; active zero is represented as legacy `99.0` because the parent API
-rejects zero. A dialect-specific database trigger handles old replicas that
-update only the legacy column: when that value changes and the active value
-does not, the trigger copies the new legacy value into active storage. It does
-not reinterpret a post-upgrade legacy `99.0`, so an old replica can explicitly
-select that threshold.
-
-Downgrade removes the synchronization trigger, copies the latest active value
-into legacy storage (`0.0` maps to `99.0`, positive values copy exactly), and
-then drops the active column. This preserves the most recent current-replica
-write in a representation the parent schema can read.
+Downgrade returns the active column to the nullable, no-default shape supplied by
+the compatibility revision and leaves the legacy column untouched.
 
 ## Risks / Trade-offs
 
-- [Risk] Existing deployments might have stored `99.0` intentionally. → Only
-  a version-1 settings row with equal creation/update timestamps is treated as
-  the historical pristine default. Any `99.0` row with evidence of a settings
-  update is preserved even when that update was unrelated, favoring operator
-  data over an unverifiable default inference.
-- [Risk] Old and current replicas may serve concurrently. → Current replicas
-  dual-write; a database trigger absorbs legacy-only changes without
-  overriding a simultaneous active write; both remain under the existing
-  optimistic settings-version contract.
+- [Risk] Existing configured thresholds are reset to the requested new
+  default. → This is an explicit activation release; the migration contract
+  initializes every existing row to `0.0`, as requested by the operator.
+- [Risk] Old and current replicas may serve concurrently. → The prerequisite
+  compatibility release widens both API schemas before this migration is
+  deployed; this migration does not attempt to synchronize legacy writes.
 - [Risk] A zero threshold could send more warm-up traffic. → Warm-up remains
   globally and per-account opt-in, post-reset availability-gated, bounded by
   the existing sender/concurrency controls, and deduplicated per reset tuple.
@@ -102,9 +86,7 @@ write in a representation the parent schema can read.
 
 ## Migration Plan
 
-Apply the new Alembic revision during the normal startup migration. It adds and
-backfills active storage using version-based pristine provenance without
-mutating the legacy column. During rollout, current replicas dual-write while
-the database synchronizes old-replica legacy-only updates into active storage.
-Rollback copies active storage into the legacy-compatible representation,
-removes synchronization, and then contracts the active column.
+Deploy the compatibility revision first, then apply this activation revision
+during the normal startup migration. Rollback downgrades only the active column
+back to the compatibility revision's nullable shape; the legacy column is never
+rewritten.

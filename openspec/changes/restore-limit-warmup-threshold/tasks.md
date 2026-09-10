@@ -9,17 +9,15 @@
 
 ## 2. Settings and migration
 
-- [x] 2.1 Change repository, ORM, and API defaults/validation to allow `0.0`,
-  while mapping the public setting to active storage and dual-writing a
-  legacy-compatible value into the previous column.
-- [x] 2.2 Add an expand/contract Alembic migration that maps a historical
-  `99.0` default to `0.0` only for a pristine version-1 settings row with
-  matching creation/update timestamps, preserves configured `99.0`, copies
-  other values, and leaves the legacy column intact.
+- [x] 2.1 Change repository, ORM, and API defaults/validation to allow `0.0`
+  and make the active column the only runtime source of truth.
+- [x] 2.2 Add an activation Alembic migration dependent on the compatibility
+  stage; initialize every existing active value to `0.0` and make it non-null
+  with a `0.0` default without rewriting the legacy column.
 - [x] 2.3 Update frontend schemas, numeric bounds, fixtures, and translated
   descriptions.
-- [x] 2.4 Synchronize legacy-only mixed-version writes into active storage and
-  copy the latest active value back to the legacy representation on downgrade.
+- [x] 2.4 Downgrade only the active column back to the compatibility shape and
+  verify that legacy data is untouched.
 
 ## 3. Regression coverage
 
@@ -28,8 +26,8 @@
   the inclusive boundary.
 - [x] 3.3 Prove paid-to-Free fallback respects positive thresholds and zero
   threshold behavior.
-- [x] 3.4 Cover API dual-write, migration provenance, legacy-only mixed-version
-  writes, downgrade preservation, frontend schema, and component contracts.
+- [x] 3.4 Cover active-column initialization, compatibility-shape downgrade,
+  frontend schema, and component contracts.
 
 ## 4. Verification
 

@@ -932,9 +932,9 @@ async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_
     ("initial_threshold", "initial_version", "was_updated", "expected_threshold"),
     [
         (99.0, 1, False, 0.0),
-        (99.0, 1, True, 99.0),
-        (99.0, 2, False, 99.0),
-        (50.0, 2, False, 50.0),
+        (99.0, 1, True, 0.0),
+        (99.0, 2, False, 0.0),
+        (50.0, 2, False, 0.0),
     ],
 )
 async def test_limit_warmup_threshold_migration_adds_active_column_without_mutating_legacy(
@@ -1008,7 +1008,8 @@ async def test_limit_warmup_threshold_migration_adds_active_column_without_mutat
 
         from app.db.migrate import _build_alembic_config
 
-        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        compatibility_revision = "20260909_130000_stage_limit_warmup_zero_compat"
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), compatibility_revision))
 
         async with session_factory() as session:
             legacy_value = (
@@ -1027,8 +1028,11 @@ async def test_limit_warmup_threshold_migration_adds_active_column_without_mutat
             columns = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).all()
             column_names = {row[1] for row in columns}
             legacy_column = next(row for row in columns if row[1] == "limit_warmup_exhausted_threshold_percent")
-            assert "limit_warmup_reset_threshold_percent" not in column_names
+            assert "limit_warmup_reset_threshold_percent" in column_names
             assert legacy_column[4] in ("99.0", "99")
+            active_column = next(row for row in columns if row[1] == "limit_warmup_reset_threshold_percent")
+            assert active_column[3] == 0
+            assert active_column[4] is None
 
         await to_thread.run_sync(lambda: command.upgrade(_build_alembic_config(db_url), "head"))
 
@@ -1053,7 +1057,7 @@ async def test_limit_warmup_threshold_migration_adds_active_column_without_mutat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("updated_legacy_threshold", [75.0, 99.0])
-async def test_limit_warmup_threshold_migration_syncs_mixed_version_writes(
+async def test_limit_warmup_threshold_migration_does_not_sync_legacy_writes(
     tmp_path,
     updated_legacy_threshold: float,
 ):
@@ -1106,7 +1110,7 @@ async def test_limit_warmup_threshold_migration_syncs_mixed_version_writes(
                 )
             ).scalar_one()
 
-        assert active_threshold == updated_legacy_threshold
+        assert active_threshold == 0.0
 
         async with session_factory() as session:
             await session.execute(
@@ -1143,15 +1147,16 @@ async def test_limit_warmup_threshold_migration_syncs_mixed_version_writes(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("active_threshold", "expected_legacy_threshold"),
-    [(0.0, 99.0), (37.5, 37.5)],
+    [(0.0, 50.0), (37.5, 50.0)],
 )
-async def test_limit_warmup_threshold_downgrade_copies_latest_active_value(
+async def test_limit_warmup_threshold_downgrade_restores_compatibility_shape(
     tmp_path,
     active_threshold: float,
     expected_legacy_threshold: float,
 ):
     db_url = f"sqlite+aiosqlite:///{tmp_path / f'limit-warmup-downgrade-{active_threshold}.sqlite'}"
     parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    compatibility_revision = "20260909_130000_stage_limit_warmup_zero_compat"
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
 
@@ -1190,7 +1195,7 @@ async def test_limit_warmup_threshold_downgrade_copies_latest_active_value(
 
         from app.db.migrate import _build_alembic_config
 
-        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), compatibility_revision))
 
         async with session_factory() as session:
             legacy_threshold = (
@@ -1206,6 +1211,14 @@ async def test_limit_warmup_threshold_downgrade_copies_latest_active_value(
             ).scalar_one()
 
         assert legacy_threshold == expected_legacy_threshold
+
+        async with session_factory() as session:
+            active_threshold_after_downgrade = (
+                await session.execute(
+                    text("SELECT limit_warmup_reset_threshold_percent FROM dashboard_settings WHERE id = 1")
+                )
+            ).scalar_one()
+        assert active_threshold_after_downgrade == active_threshold
     finally:
         await engine.dispose()
 

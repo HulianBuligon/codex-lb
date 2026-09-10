@@ -38,6 +38,16 @@ atomic attempt claim for that tuple.
 - **THEN** the system sends at most one warm-up request for that
   account/window/reset tuple
 
+#### Scenario: Warm-up follows a real reset regardless of prior usage
+
+- **GIVEN** limit warm-up is enabled globally and for an active account
+- **AND** the account's previous usage sample for a selected window reports
+  any usage below or at exhaustion
+- **WHEN** background usage refresh records a newer sample that proves a real
+  reset for that window and satisfies the configured availability gate
+- **THEN** the system sends at most one warm-up request for that
+  account/window/reset tuple
+
 #### Scenario: Positive threshold skips a below-threshold reset
 
 - **GIVEN** limit warm-up is enabled globally and for an account

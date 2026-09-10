@@ -270,7 +270,7 @@ async def test_settings_api_accepts_zero_limit_warmup_threshold(async_client):
             )
         ).one()
 
-    assert configured_legacy_value == 50.0
+    assert configured_legacy_value == 99.0
     assert configured_active_value == 50.0
 
     response = await async_client.put(

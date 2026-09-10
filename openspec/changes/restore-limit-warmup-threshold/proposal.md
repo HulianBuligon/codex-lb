@@ -22,13 +22,12 @@ for operators who want a stricter pre-reset usage gate.
 - Apply the same threshold to the paid-to-Free monthly transition candidate;
   with a zero threshold, a missing pre-refresh sample remains eligible, while a
   positive threshold requires the sample.
-- Add an expand/contract storage column for the active threshold, mapping the
-  historical `99.0` default to `0.0` only for version-1 settings rows whose
-  creation/update timestamps still match, while preserving configured `99.0`
-  and copying other values.
-- Keep mixed-version replicas synchronized: current replicas dual-write both
-  columns, legacy-only writes update active storage, and downgrade copies the
-  latest active value back into the legacy representation before contraction.
+- Activate the nullable compatibility column staged by the prerequisite PR,
+  initialize every existing row to `0.0`, and make it non-null with a `0.0`
+  server default.
+- Keep the legacy column mapped internally for schema compatibility, but remove
+  sentinels, provenance heuristics, triggers, dual writes, and legacy-column
+  synchronization from the runtime and migration.
 
 ## Capabilities
 
@@ -48,9 +47,8 @@ None.
 ## Impact
 
 - Affected code: limit warm-up candidate selection, dashboard settings model,
-  settings defaults/validation and dual-write behavior, frontend
-  schema/control/locales, and one expand/contract Alembic migration with
-  mixed-version synchronization.
+  settings defaults/validation, frontend schema/control/locales, and the
+  activation Alembic migration that depends on the compatibility stage.
 - Affected tests: limit warm-up unit tests, settings API/schema tests, frontend
   component/schema tests, and migration assertions.
 - No new endpoint, environment variable, dependency, or runtime worker is
