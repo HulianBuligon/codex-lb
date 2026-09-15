@@ -15602,6 +15602,21 @@ async def test_stream_responses_preserves_usage_limit_reset_hint(monkeypatch):
     assert request_logs.calls[0]["error_code"] == "usage_limit_reached"
 
 
+def test_response_failed_event_from_upstream_error_preserves_reset_metadata():
+    event = streaming_retry_module._response_failed_event_from_upstream_error(
+        "rate_limit_exceeded",
+        {"message": "quota exhausted", "resets_at": 1_700_003_600, "resets_in_seconds": 3600},
+        response_id="resp-rate-limit",
+    )
+
+    assert event["response"]["error"] == {
+        "message": "quota exhausted",
+        "type": "server_error",
+        "code": "rate_limit_exceeded",
+        "resets_at": 1_700_003_600,
+    }
+
+
 @pytest.mark.asyncio
 async def test_stream_with_retry_keeps_sse_alive_while_account_capacity_recovers(monkeypatch):
     settings = _make_proxy_settings()
