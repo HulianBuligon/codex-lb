@@ -1149,9 +1149,9 @@ class _StreamingRetryMixin:
                         setattr(retry_exc, _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR, True)
                         raise retry_exc from exc
                     yield format_sse_event(
-                        response_failed_event(
+                        _response_failed_event_from_upstream_error(
                             exc.code,
-                            error_message,
+                            exc.error,
                             response_id=settlement.response_id or request_id,
                         )
                     )
