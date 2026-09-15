@@ -29,4 +29,3 @@ server default, backfill, or runtime activation. The existing
 - **WHEN** it is downgraded
 - **THEN** `limit_warmup_reset_threshold_percent` is removed
 - **AND** `limit_warmup_exhausted_threshold_percent` and its stored values remain
-

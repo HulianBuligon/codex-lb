@@ -32,4 +32,3 @@ the persisted row and returned response.
   `0.0`
 - **THEN** the request succeeds
 - **AND** the persisted legacy threshold and response are both `99.0`
-

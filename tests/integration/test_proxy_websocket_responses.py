@@ -6549,6 +6549,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
         require_security_work_authorized,
         require_preferred_account,
         defer_no_account_error,
+        headers=None,
     ):
         del (
             self,
@@ -6570,6 +6571,7 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
             require_security_work_authorized,
             require_preferred_account,
             defer_no_account_error,
+            headers,
         )
         assert request_state.previous_response_id == "resp_ws_prev_anchor"
         return SimpleNamespace(id="acct_ws_prev_connect_failure")
@@ -8780,7 +8782,7 @@ def test_backend_responses_websocket_emits_timeout_failure_for_stalled_upstream(
         del self
         log_calls.append(kwargs)
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -9777,7 +9779,7 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
         connect_models.append(model)
         return SimpleNamespace(id=f"acct_ws_proxy_{len(connect_models)}"), upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -9943,7 +9945,7 @@ def test_backend_responses_websocket_transparently_retries_precreated_usage_limi
         connect_models.append(model)
         return SimpleNamespace(id=f"acct_ws_proxy_{len(connect_models)}"), upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -10080,7 +10082,7 @@ def test_backend_responses_websocket_transparently_retries_precreated_error_usag
         connect_models.append(model)
         return SimpleNamespace(id=f"acct_ws_proxy_{len(connect_models)}"), upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -10224,7 +10226,7 @@ def test_backend_responses_websocket_retries_stale_account_model_route_on_anothe
         excluded_snapshots.append(set(request_state.excluded_account_ids))
         return SimpleNamespace(id=account_ids[index]), upstreams[index]
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -10344,7 +10346,7 @@ def test_backend_responses_websocket_previous_response_usage_limit_returns_upstr
         captured_preferred_accounts.append(request_state.preferred_account_id)
         return SimpleNamespace(id="acct_ws_proxy_owner"), first_upstream
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -10467,7 +10469,7 @@ def test_backend_responses_websocket_transparent_replay_emits_no_accounts_when_r
             )
         return None, None
 
-    async def fake_handle_stream_error(self, account, error, code):
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
         del self, account, error
         handled_error_codes.append(code)
 
@@ -11140,6 +11142,7 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
         require_security_work_authorized,
         require_preferred_account,
         defer_no_account_error,
+        headers=None,
     ):
         del (
             self,
@@ -11161,6 +11164,7 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
             require_security_work_authorized,
             require_preferred_account,
             defer_no_account_error,
+            headers,
         )
         assert request_state.previous_response_id == "resp_ws_prev_anchor_client"
         assert request_state.fresh_upstream_request_is_retry_safe is True

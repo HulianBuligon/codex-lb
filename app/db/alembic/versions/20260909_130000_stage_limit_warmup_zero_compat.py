@@ -1,7 +1,7 @@
 """stage the reset warm-up threshold for a mixed-version rollout
 
 Revision ID: 20260909_130000_stage_limit_warmup_zero_compat
-Revises: 20260909_070000_automation_run_claim_budget
+Revises: 20260913_000000_add_oidc_provider_flow
 Create Date: 2026-09-09
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260909_130000_stage_limit_warmup_zero_compat"
-down_revision = "20260909_070000_automation_run_claim_budget"
+down_revision = "20260913_000000_add_oidc_provider_flow"
 branch_labels = None
 depends_on = None
 

@@ -49,4 +49,3 @@ of truth.
   carries the ORM/runtime cutover.
 - **[Risk]** The new revision could create an Alembic head. **Mitigation:** set
   its `down_revision` to the current main head and run migration graph checks.
-
