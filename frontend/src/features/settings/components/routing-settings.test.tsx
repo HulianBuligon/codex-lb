@@ -825,7 +825,7 @@ describe("RoutingSettings", () => {
     );
 
     await user.clear(screen.getByLabelText("Min usage percent"));
-    await user.type(screen.getByLabelText("Min usage percent"), "0");
+    await user.type(screen.getByLabelText("Min usage percent"), "100.1");
 
     expect(screen.getByRole("button", { name: "Save warm-up settings" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
